@@ -37,6 +37,8 @@ export type HeadingEntry = {
 export type ReferenceMeta = {
   keywords: ReferenceKeyword[];
   headings: HeadingEntry[];
+  /** 0-based pages carrying a five-star mark. Notes only. */
+  stars: number[];
   pageCount: number;
 };
 
@@ -85,6 +87,9 @@ export async function scanNoteMeta(
     notePath,
     pageList,
   )) as ApiResponse<RawTitle[]>;
+  const starsRes = (await PluginFileAPI.searchFiveStars(
+    notePath,
+  )) as ApiResponse<number[]>;
 
   const titles = titlesRes?.success ? titlesRes.result ?? [] : [];
   const known = new Map(
@@ -117,6 +122,9 @@ export async function scanNoteMeta(
       entry => ({keyword: entry.keyword, page: entry.page}),
     ),
     headings,
+    stars: (starsRes?.success ? starsRes.result ?? [] : [])
+      .filter(page => typeof page === 'number')
+      .sort((a, b) => a - b),
     pageCount: total,
   };
   metaCache.set(notePath, meta);

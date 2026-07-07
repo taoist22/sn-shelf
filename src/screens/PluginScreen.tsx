@@ -63,13 +63,17 @@ import {
 
 type TabKey = 'shelf' | 'quotes' | 'projects';
 
+/** Marks the synthetic working-note card — not a real reference entry. */
+const WORKING_CARD_ID = '__working__';
+
 function ThumbCard(props: {
   item: ShelfTarget;
   widthPct: `${number}%`;
+  badge?: string;
   onOpen: (item: ShelfTarget) => void;
   onDetail: (item: ShelfTarget) => void;
 }): React.JSX.Element {
-  const {item, widthPct, onOpen, onDetail} = props;
+  const {item, widthPct, badge, onOpen, onDetail} = props;
   const [thumbUri, setThumbUri] = useState<string | null>(null);
 
   useEffect(() => {
@@ -93,6 +97,7 @@ function ThumbCard(props: {
       onPress={() => onOpen(item)}
       onLongPress={() => onDetail(item)}
       delayLongPress={400}>
+      {badge ? <Text style={styles.cardBadge}>{badge}</Text> : null}
       {isNote && thumbUri ? (
         <Image
           source={{uri: `file://${thumbUri}`}}
@@ -718,7 +723,8 @@ export function PluginScreen(): React.JSX.Element {
   }
 
   function renderDetail(item: ShelfTarget): React.JSX.Element {
-    const canMove = context.kind === 'general';
+    const isWorkingCard = item.id === WORKING_CARD_ID;
+    const canMove = context.kind === 'general' && !isWorkingCard;
     const inFolderProject =
       context.kind === 'project' && context.project.anchorKind === 'folder';
     const canBeWorkingNote =
@@ -763,25 +769,29 @@ export function PluginScreen(): React.JSX.Element {
               <Text style={styles.rowButtonSecondaryText}>Move</Text>
             </Pressable>
           ) : null}
-          <Pressable
-            style={styles.rowButtonSecondary}
-            onPress={() => removeReference(item.id)}>
-            <Text style={styles.rowButtonSecondaryText}>Remove</Text>
-          </Pressable>
+          {!isWorkingCard ? (
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => removeReference(item.id)}>
+              <Text style={styles.rowButtonSecondaryText}>Remove</Text>
+            </Pressable>
+          ) : null}
         </View>
 
-        <View style={styles.actionsRow}>
-          <Pressable
-            style={styles.rowButtonSecondary}
-            onPress={() => moveDetail(-1)}>
-            <Text style={styles.rowButtonSecondaryText}>◀ Earlier</Text>
-          </Pressable>
-          <Pressable
-            style={styles.rowButtonSecondary}
-            onPress={() => moveDetail(1)}>
-            <Text style={styles.rowButtonSecondaryText}>Later ▶</Text>
-          </Pressable>
-        </View>
+        {!isWorkingCard ? (
+          <View style={styles.actionsRow}>
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => moveDetail(-1)}>
+              <Text style={styles.rowButtonSecondaryText}>◀ Earlier</Text>
+            </Pressable>
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => moveDetail(1)}>
+              <Text style={styles.rowButtonSecondaryText}>Later ▶</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         {canBeWorkingNote ? (
           <View style={styles.actionsRow}>
@@ -821,6 +831,24 @@ export function PluginScreen(): React.JSX.Element {
 
         {item.kind === 'note' ? (
           <>
+            {detailMeta && detailMeta.stars.length > 0 ? (
+              <>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Starred Pages</Text>
+                  <Text style={styles.count}>{detailMeta.stars.length}</Text>
+                </View>
+                <View style={styles.chipWrap}>
+                  {detailMeta.stars.map(page => (
+                    <Pressable
+                      key={`star-${page}`}
+                      style={styles.chip}
+                      onPress={() => openNotePage(item, page)}>
+                      <Text style={styles.chipText}>★ p.{page + 1}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </>
+            ) : null}
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Keywords</Text>
               <Pressable onPress={rescanDetailMeta}>
@@ -1159,17 +1187,48 @@ export function PluginScreen(): React.JSX.Element {
             <Text style={styles.count}>{project.references.length}</Text>
           </View>
 
-          {project.references.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyTitle}>No references pinned yet.</Text>
-              <Text style={styles.emptyBody}>
-                Open a source you want to keep handy for this project, then tap
-                Pin This Page.
-              </Text>
-            </View>
-          ) : (
-            renderGrid(project.references)
-          )}
+          {(() => {
+            const workingTarget = projectNoteTarget(project);
+            const workingCard = workingTarget
+              ? {...workingTarget, id: WORKING_CARD_ID}
+              : null;
+            if (!workingCard && project.references.length === 0) {
+              return (
+                <View style={styles.emptyBox}>
+                  <Text style={styles.emptyTitle}>
+                    No references pinned yet.
+                  </Text>
+                  <Text style={styles.emptyBody}>
+                    Open a source you want to keep handy for this project, then
+                    tap Pin This Page.
+                  </Text>
+                </View>
+              );
+            }
+            return (
+              <View style={styles.grid}>
+                {workingCard ? (
+                  <ThumbCard
+                    key={WORKING_CARD_ID}
+                    item={workingCard}
+                    widthPct={cardWidthPct}
+                    badge="WORKING"
+                    onOpen={() => openAnchor(project)}
+                    onDetail={openDetail}
+                  />
+                ) : null}
+                {project.references.map(item => (
+                  <ThumbCard
+                    key={item.id}
+                    item={item}
+                    widthPct={cardWidthPct}
+                    onOpen={openItem}
+                    onDetail={openDetail}
+                  />
+                ))}
+              </View>
+            );
+          })()}
         </>
       );
     }
@@ -1643,6 +1702,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     textDecorationLine: 'underline',
+  },
+  cardBadge: {
+    backgroundColor: '#202020',
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    textAlign: 'center',
   },
   cardTitle: {
     color: '#202020',
