@@ -44,6 +44,7 @@ import {
   createProjectFromNote,
   getGeneralItems,
   hydrateShelfState,
+  listAllPinnedTargets,
   listProjects,
   moveToProject,
   removeProject,
@@ -53,7 +54,11 @@ import {
   saveProjectReferences,
   setProjectWorkingNote,
 } from '../storage/sessionShelf';
-import {ensureThumbnail, refreshThumbnail} from '../services/thumbnails';
+import {
+  ensureThumbnail,
+  pruneThumbnails,
+  refreshThumbnail,
+} from '../services/thumbnails';
 import {
   forgetHeadingText,
   recognizeNewHeadings,
@@ -299,6 +304,8 @@ export function PluginScreen(): React.JSX.Element {
               startCapture();
             }
           }
+          // Drop cached thumbnails of pins that no longer exist.
+          pruneThumbnails(listAllPinnedTargets()).catch(() => {});
         });
       });
 

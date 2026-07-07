@@ -95,6 +95,43 @@ export async function ensureThumbnail(
   }
 }
 
+/**
+ * Deletes cached thumbnails that no longer belong to any pinned target,
+ * so thumbs of removed pins don't accumulate. Fire-and-forget at startup.
+ */
+export async function pruneThumbnails(
+  validTargets: ShelfTarget[],
+): Promise<void> {
+  const dir = await thumbsDir();
+  if (!dir) {
+    return;
+  }
+  const valid = new Set(
+    validTargets
+      .filter(target => target.kind === 'note')
+      .map(target => thumbKey(target)),
+  );
+  const entries = await FileUtils.listFiles(dir).catch(() => null);
+  if (!entries) {
+    return;
+  }
+  for (const entry of entries) {
+    // listFiles returns names or full paths depending on firmware.
+    const name = entry.split('/').pop() ?? entry;
+    if (!name.endsWith('.png')) {
+      continue;
+    }
+    const key = name.replace(/_r\d+\.png$/, '');
+    if (!valid.has(key)) {
+      try {
+        await FileUtils.deleteFile(`${dir}/${name}`);
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+}
+
 /** Deletes the cached thumbnail and renders a fresh one under a new name. */
 export async function refreshThumbnail(
   target: ShelfTarget,

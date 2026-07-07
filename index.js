@@ -31,7 +31,7 @@ PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE', 'DOC'], {
 PluginManager.registerButton(BUTTON_TYPE_TEXT_SELECTION, ['DOC'], {
   id: CAPTURE_BUTTON_ID,
   name: 'Capture Quote',
-  icon: Image.resolveAssetSource(require('./assets/icon.png')).uri,
+  icon: Image.resolveAssetSource(require('./assets/quote.png')).uri,
   showType: SHOW_TYPE_WITH_UI,
 });
 

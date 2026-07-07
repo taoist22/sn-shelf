@@ -141,5 +141,5 @@ shelf; `docs/` handoffs track iteration decisions.
 
 ## Credits
 
-- Bookshelf icon created by
+- Bookshelf and quote icons created by
   [Freepik - Flaticon](https://www.flaticon.com/free-icons/furniture-and-household).

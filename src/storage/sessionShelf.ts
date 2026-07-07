@@ -1,4 +1,5 @@
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
+import {projectNoteTarget} from '../domain/shelfItem';
 import {
   createProject,
   deleteProject,
@@ -35,6 +36,19 @@ export async function hydrateShelfState(): Promise<void> {
   if (persisted) {
     state = persisted;
   }
+}
+
+/** Every target that may own a cached thumbnail (pins + working notes). */
+export function listAllPinnedTargets(): ShelfTarget[] {
+  const targets: ShelfTarget[] = [...state.general];
+  for (const project of state.projects) {
+    targets.push(...project.references);
+    const noteTarget = projectNoteTarget(project);
+    if (noteTarget) {
+      targets.push(noteTarget);
+    }
+  }
+  return targets;
 }
 
 /** Derives the Shelf view from the currently open file. */
