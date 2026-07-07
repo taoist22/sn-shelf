@@ -6,3 +6,4 @@ ios/Pods/
 *.log
 .DS_Store
 coverage/
+coverage/
