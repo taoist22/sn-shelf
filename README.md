@@ -1,6 +1,6 @@
 # Shelf
 
-A study-session navigator for Supernote e-ink devices. Shelf keeps each
+A reference navigator for Supernote e-ink devices. Shelf keeps each
 project's working note and its reference materials one tap apart: pin notes,
 PDFs, and EPUBs to a per-project reference shelf, jump between them, capture
 quotes from your reading, and place those quotes into your working note with
@@ -96,7 +96,7 @@ Pins land on the shelf you are looking at:
 
 ## Install
 
-1. Copy `build/outputs/SNShelf.snplg` to the device (Partner app, or the
+1. Copy `build/outputs/SNShelf.snplg` to the device (Partner app, Browse and Access, or the
    `MyStyle` folder over USB).
 2. On the device: toolbar plugin icon → Manage Plugins → Add Plugin.
 3. When updating: remove the old plugin and the old `.snplg` first.
