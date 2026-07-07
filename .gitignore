@@ -7,3 +7,4 @@ ios/Pods/
 .DS_Store
 coverage/
 coverage/
+docs/*-handoff.md
