@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/cab00cbd-c920-4aa1-b9f1-dff809c2548e
+
 # Shelf
 
 A reference navigator for Supernote e-ink devices. Shelf keeps each
