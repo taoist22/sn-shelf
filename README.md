@@ -28,7 +28,8 @@ the loop between where you write and what you're reading.
   file could belong to several: note anchor > pinned reference > containing
   folder (deepest wins) > general.
 - **Quotes** — text captured from documents waits in a per-project inbox
-  until you place it into the working note.
+  until you place it into the working note. Quotes can also be sent from a
+  computer or tablet over Wi-Fi (see below).
 
 ## Using Shelf
 
@@ -86,6 +87,31 @@ Pins land on the shelf you are looking at:
    avoid colliding with your writing. Elsewhere, the button takes you to the
    working note first.
 
+### Send quotes from a computer
+
+Text copied on any machine on the same Wi-Fi can land in the Quotes tab —
+no cloud account, no companion app:
+
+1. Enable **Browse & Access** on the Supernote (note the URL it shows).
+2. Upload the text as a file named `shelf-quote-<anything>.txt` into the
+   device's `INBOX` folder. One command does it:
+
+   ```bash
+   curl -F "file=@shelf-quote-note.txt" http://<device-ip>:8089/INBOX
+   ```
+
+   Anything that can POST a file works (Windows, Linux, a phone). On a Mac,
+   wrap it in a Shortcuts quick action so that selecting text → right-click →
+   **Services → Send to Supernote** is the whole flow: a **Run Shell Script**
+   action that writes stdin (falling back to `pbpaste`) to
+   `shelf-quote-$(date +%Y-%m-%d-%H%M%S).txt` and runs the `curl` above.
+3. Open Shelf's **Quotes** tab. Waiting files appear in an **Imported**
+   section and are removed from `INBOX` (only after the quotes are safely
+   saved; a re-sent filename is never imported twice). Imported quotes place
+   onto the current page of **any** note — no source link, since the source
+   isn't on the device. A `-YYYY-MM-DD-HHMMSS` filename suffix becomes the
+   shown capture date.
+
 ### Notes on behavior
 
 - Shelf state (projects, pins, quotes, recognized headings) persists on the
@@ -132,7 +158,7 @@ src/
   app/        events and plugin-button wiring
   screens/    the plugin panel (tabs, grid, detail, capture)
   domain/     project/context model and pure state logic
-  services/   thumbnails (generateNotePng cache), note metadata + heading recognition
+  services/   thumbnails (generateNotePng cache), note metadata + heading recognition, INBOX quote import
   supernote/  Supernote API adapters (navigation intents, capture, inserts)
   storage/    persisted state (native ShelfStorage JSON) and session wrapper
 android/      native modules: ShelfNavigation (open intents), ShelfStorage
