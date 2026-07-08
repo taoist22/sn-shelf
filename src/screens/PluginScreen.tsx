@@ -37,6 +37,7 @@ import {
   getCurrentTarget,
   insertQuoteIntoCurrentNote,
   readSelectedText,
+  saveCurrentNoteQuietly,
 } from '../supernote/supernoteShelf';
 import {
   addQuoteToProject,
@@ -149,6 +150,11 @@ export function PluginScreen(): React.JSX.Element {
   const [projects, setProjects] = useState<ShelfProject[]>([]);
   const [generalItems, setGeneralItems] = useState<ShelfTarget[]>([]);
   const [inboxQuotes, setInboxQuotes] = useState<ShelfQuote[]>([]);
+  // Session-scoped placement preferences: source-link toggle + multi-select.
+  const [includeLinks, setIncludeLinks] = useState(true);
+  const [selectedQuoteIds, setSelectedQuoteIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [detailItem, setDetailItem] = useState<ShelfTarget | null>(null);
   const [detailMeta, setDetailMeta] = useState<ReferenceMeta | null>(null);
   const [detailMetaState, setDetailMetaState] = useState<
@@ -169,6 +175,12 @@ export function PluginScreen(): React.JSX.Element {
   const [deleteArmedPath, setDeleteArmedPath] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [isReady, setIsReady] = useState(false);
+
+  // Page-full statuses render large and bold so the user can tell at a
+  // glance why placement did not happen. Derived from the message text to
+  // keep setStatus a plain state setter for the hooks-deps rule.
+  const statusStrong =
+    status.startsWith('No clear space') || status.includes('the page is full');
 
   const refresh = useCallback(async () => {
     const current = await getCurrentTarget().catch(() => null);
@@ -273,7 +285,13 @@ export function PluginScreen(): React.JSX.Element {
         return;
       }
       try {
-        await insertQuoteIntoCurrentNote(quote);
+        const result = await insertQuoteIntoCurrentNote(quote, {
+          includeLink: includeLinks,
+        });
+        if (result === 'page-full') {
+          setStatus('No clear space on this page — turn to a fresh page.');
+          return;
+        }
         removeQuoteFromProject(project.anchorPath, quote.id);
         setStatus('Quote placed on this page.');
         await refresh();
@@ -282,7 +300,7 @@ export function PluginScreen(): React.JSX.Element {
         setStatus(`Could not place quote: ${String(error)}`);
       }
     },
-    [refresh],
+    [refresh, includeLinks],
   );
 
   const deleteInboxQuote = useCallback(
@@ -297,7 +315,13 @@ export function PluginScreen(): React.JSX.Element {
   const placeInboxQuote = useCallback(
     async (quote: ShelfQuote) => {
       try {
-        await insertQuoteIntoCurrentNote(quote);
+        const result = await insertQuoteIntoCurrentNote(quote, {
+          includeLink: includeLinks,
+        });
+        if (result === 'page-full') {
+          setStatus('No clear space on this page — turn to a fresh page.');
+          return;
+        }
         removeQuoteFromInbox(quote.id);
         setStatus('Quote placed on this page.');
         await refresh();
@@ -306,8 +330,87 @@ export function PluginScreen(): React.JSX.Element {
         setStatus(`Could not place quote: ${String(error)}`);
       }
     },
-    [refresh],
+    [refresh, includeLinks],
   );
+
+  const toggleQuoteSelected = useCallback((quoteId: string) => {
+    setSelectedQuoteIds(previous => {
+      const next = new Set(previous);
+      if (next.has(quoteId)) {
+        next.delete(quoteId);
+      } else {
+        next.add(quoteId);
+      }
+      return next;
+    });
+  }, []);
+
+  // Places every selected quote that is placeable on the CURRENT page:
+  // imported quotes on any note, project quotes only on their working note.
+  // Inserts stay sequential (parallel inserts freeze the device) and the
+  // note is saved once at the end.
+  const placeSelected = useCallback(async () => {
+    const anchor =
+      context.kind === 'project' && context.isAnchor ? context.project : null;
+    const batch: Array<{quote: ShelfQuote; remove: () => void}> = [
+      ...inboxQuotes
+        .filter(quote => selectedQuoteIds.has(quote.id))
+        .map(quote => ({
+          quote,
+          remove: () => removeQuoteFromInbox(quote.id),
+        })),
+      ...(anchor
+        ? anchor.quotes
+            .filter(quote => selectedQuoteIds.has(quote.id))
+            .map(quote => ({
+              quote,
+              remove: () =>
+                removeQuoteFromProject(anchor.anchorPath, quote.id),
+            }))
+        : []),
+    ];
+    if (batch.length === 0) {
+      return;
+    }
+    let placed = 0;
+    let pageFull = false;
+    let failure: string | null = null;
+    for (const entry of batch) {
+      try {
+        const result = await insertQuoteIntoCurrentNote(entry.quote, {
+          includeLink: includeLinks,
+          skipSave: true,
+          strictFit: true,
+        });
+        if (result === 'page-full') {
+          pageFull = true;
+          break;
+        }
+      } catch (error) {
+        failure = String(error);
+        break;
+      }
+      entry.remove();
+      setSelectedQuoteIds(previous => {
+        const next = new Set(previous);
+        next.delete(entry.quote.id);
+        return next;
+      });
+      placed += 1;
+    }
+    await saveCurrentNoteQuietly();
+    await refresh();
+    if (failure) {
+      setStatus(`Placed ${placed} of ${batch.length}: ${failure}`);
+    } else if (pageFull) {
+      setStatus(
+        `Placed ${placed} of ${batch.length} — the page is full. Turn the page and place the rest.`,
+      );
+    } else {
+      setStatus(`Placed ${placed} quote${placed === 1 ? '' : 's'}.`);
+      PluginManager.closePluginView();
+    }
+  }, [context, inboxQuotes, selectedQuoteIds, includeLinks, refresh]);
 
   // Opening the Quotes tab drains INBOX/shelf-quote-*.txt into the
   // imported-quotes inbox (files are deleted once the state is saved).
@@ -366,6 +469,7 @@ export function PluginScreen(): React.JSX.Element {
         setShowMoveChooser(false);
         setCapture(null);
         setDeleteArmedPath(null);
+        setSelectedQuoteIds(new Set());
         setStatus('');
       },
     });
@@ -378,6 +482,7 @@ export function PluginScreen(): React.JSX.Element {
       setDetailMetaState('idle');
       setShowMoveChooser(false);
       setCapture(null);
+      setSelectedQuoteIds(new Set());
       refresh();
     });
 
@@ -878,7 +983,11 @@ export function PluginScreen(): React.JSX.Element {
           </View>
         ) : null}
 
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+        {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
 
         {item.kind === 'note' ? (
           <>
@@ -1063,7 +1172,11 @@ export function PluginScreen(): React.JSX.Element {
           </Pressable>
         </View>
 
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+        {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
       </>
     );
   }
@@ -1096,6 +1209,24 @@ export function PluginScreen(): React.JSX.Element {
               — {quote.sourceTitle}, {formatPage(quote.sourcePage)}
             </Text>
             <View style={styles.actionsRow}>
+              {isAnchor ? (
+                <Pressable
+                  style={
+                    selectedQuoteIds.has(quote.id)
+                      ? styles.rowButton
+                      : styles.rowButtonSecondary
+                  }
+                  onPress={() => toggleQuoteSelected(quote.id)}>
+                  <Text
+                    style={
+                      selectedQuoteIds.has(quote.id)
+                        ? styles.rowButtonText
+                        : styles.rowButtonSecondaryText
+                    }>
+                    {selectedQuoteIds.has(quote.id) ? '✓ Selected' : 'Select'}
+                  </Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 style={styles.rowButton}
                 onPress={() => placeQuote(project, quote, isAnchor)}>
@@ -1142,11 +1273,29 @@ export function PluginScreen(): React.JSX.Element {
             </Text>
             <View style={styles.actionsRow}>
               {currentIsNote ? (
-                <Pressable
-                  style={styles.rowButton}
-                  onPress={() => placeInboxQuote(quote)}>
-                  <Text style={styles.rowButtonText}>Place on This Page</Text>
-                </Pressable>
+                <>
+                  <Pressable
+                    style={
+                      selectedQuoteIds.has(quote.id)
+                        ? styles.rowButton
+                        : styles.rowButtonSecondary
+                    }
+                    onPress={() => toggleQuoteSelected(quote.id)}>
+                    <Text
+                      style={
+                        selectedQuoteIds.has(quote.id)
+                          ? styles.rowButtonText
+                          : styles.rowButtonSecondaryText
+                      }>
+                      {selectedQuoteIds.has(quote.id) ? '✓ Selected' : 'Select'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.rowButton}
+                    onPress={() => placeInboxQuote(quote)}>
+                    <Text style={styles.rowButtonText}>Place on This Page</Text>
+                  </Pressable>
+                </>
               ) : null}
               <Pressable
                 style={styles.rowButtonSecondary}
@@ -1164,6 +1313,15 @@ export function PluginScreen(): React.JSX.Element {
     const projectsWithQuotes = projects.filter(
       project => project.quotes.length > 0,
     );
+    const anchor =
+      context.kind === 'project' && context.isAnchor ? context.project : null;
+    const selectedPlaceable =
+      (currentIsNote
+        ? inboxQuotes.filter(quote => selectedQuoteIds.has(quote.id)).length
+        : 0) +
+      (anchor
+        ? anchor.quotes.filter(quote => selectedQuoteIds.has(quote.id)).length
+        : 0);
     return (
       <>
         <View style={styles.workingPanel}>
@@ -1172,9 +1330,36 @@ export function PluginScreen(): React.JSX.Element {
             Captured quotes wait here until you place them into their
             project's working note.
           </Text>
+          <View style={styles.actionsRow}>
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => setIncludeLinks(value => !value)}>
+              <Text style={styles.rowButtonSecondaryText}>
+                Source links: {includeLinks ? 'On' : 'Off'}
+              </Text>
+            </Pressable>
+            {selectedPlaceable > 0 ? (
+              <Pressable style={styles.rowButton} onPress={placeSelected}>
+                <Text style={styles.rowButtonText}>
+                  Place {selectedPlaceable} Here
+                </Text>
+              </Pressable>
+            ) : null}
+            {selectedQuoteIds.size > 0 ? (
+              <Pressable
+                style={styles.rowButtonSecondary}
+                onPress={() => setSelectedQuoteIds(new Set())}>
+                <Text style={styles.rowButtonSecondaryText}>Clear</Text>
+              </Pressable>
+            ) : null}
+          </View>
         </View>
 
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+        {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
 
         {projectsWithQuotes.length === 0 && inboxQuotes.length === 0 ? (
           <View style={styles.emptyBox}>
@@ -1275,7 +1460,11 @@ export function PluginScreen(): React.JSX.Element {
           </Pressable>
 
           {renderCommonActions()}
-          {status ? <Text style={styles.status}>{status}</Text> : null}
+          {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
 
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>
@@ -1353,7 +1542,11 @@ export function PluginScreen(): React.JSX.Element {
         </View>
 
         {renderCommonActions()}
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+        {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>General Shelf</Text>
@@ -1405,7 +1598,11 @@ export function PluginScreen(): React.JSX.Element {
           </View>
         </View>
 
-        {status ? <Text style={styles.status}>{status}</Text> : null}
+        {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
 
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>All Projects</Text>
@@ -1685,6 +1882,13 @@ const styles = StyleSheet.create({
     color: '#202020',
     fontSize: 14,
     lineHeight: 20,
+    marginBottom: 12,
+  },
+  statusStrong: {
+    color: '#000000',
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 28,
     marginBottom: 12,
   },
   sectionHeader: {

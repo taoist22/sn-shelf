@@ -82,10 +82,17 @@ Pins land on the shelf you are looking at:
    project to save to.
 3. The **Quotes** tab (with a live count in its label) lists waiting quotes
    by project. In the working note, **Place on This Page** inserts the quote
-   as an editable text box with an italic source link beneath it — tapping
-   the link jumps back to the source. Quotes stack bottom-up on the page to
-   avoid colliding with your writing. Elsewhere, the button takes you to the
-   working note first.
+   as an editable text box — a half-page column, leaving the rest of the
+   line free for your own handwriting — with an italic source link beneath
+   it that jumps back to the source. The **Source links On/Off** toggle at
+   the top of the tab controls the link for everything you place that
+   session. Elsewhere, the button takes you to the working note first.
+4. **Placing several at once**: each placeable quote card shows a
+   **Select** button; selected quotes get a **Place N Here** button at the
+   top of the tab. Placement is collision-aware — quotes land in the lowest
+   clear space, below your handwriting, never on top of it. When a page has
+   no room, Shelf says so in bold and keeps the rest selected: turn to a
+   fresh page and place again.
 
 ### Send quotes from a computer
 
@@ -114,6 +121,17 @@ no cloud account, no companion app:
 
 ### Notes on behavior
 
+- **Moving placed text without changing its font** (an OS quirk that
+  affects every text-placing plugin, not just Shelf): moving a text box
+  with a plain lasso makes the reader re-fit the font to the box when it
+  loses focus. To reposition without any font change, lasso the text, tap
+  the **edit** option (as if changing bold/size), and drag that tighter
+  selection box instead. Shelf sizes its boxes to minimize the effect, but
+  the edit-mode move is the only zero-drift way the OS offers.
+- Collision-aware placement reads only lightweight element bounds from the
+  current page and skips very dense pages (falling back to simple
+  bottom-up stacking), so it stays within the platform's element-cache
+  limits.
 - Shelf state (projects, pins, quotes, recognized headings) persists on the
   device across restarts. It is private to the plugin install.
 - Keywords, stars, and headings are read from notes only — Supernote's

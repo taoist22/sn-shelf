@@ -7,6 +7,11 @@ import {
   type ShelfQuote,
   type ShelfTarget,
 } from '../domain/shelfItem';
+import {
+  estimateWrappedLines,
+  findPlacementBottom,
+} from '../domain/quoteLayout';
+import {scanPageObstacles, type ObstacleScan} from './pageObstacles';
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -62,7 +67,7 @@ function linkTypeForTarget(target: ShelfTarget): number {
 
 function estimateLinkWidth(label: string, maxWidth: number): number {
   const estimated = Math.ceil(label.length * 17) + 48;
-  return Math.max(360, Math.min(maxWidth - 440, estimated));
+  return Math.max(300, Math.min(maxWidth, estimated));
 }
 
 /** Reads the text the user last selected in the open PDF/EPUB/document. */
@@ -84,14 +89,40 @@ async function deviceWidth(): Promise<number> {
 // with content at the top. Session-scoped; resets when PluginHost restarts.
 const placementCursors = new Map<string, number>();
 
+// One obstacle scan per page per session (null = scan unavailable, use the
+// blind cursor). Placed quotes are appended so batches stack correctly; ink
+// added mid-session is missed, same staleness the cursor already accepts.
+const obstacleScans = new Map<string, ObstacleScan | null>();
+
+// Placement font and its metrics, calibrated from a device probe
+// (2026-07-07): after an edit-mode move the reader rewrites the rect to its
+// true text bounds — 315 chars wrapped to 8 lines in 960×313 at fontSize 30,
+// giving lineHeight ≈ 1.31×fontSize and average char ≈ 0.5×fontSize (both
+// ratios confirmed at fontSize 38). 36 is the native text tool's minimum
+// size, so placing at 36 keeps the lasso re-fit from ever scaling up to it.
+const QUOTE_FONT_SIZE = 36;
+const CHAR_PX = Math.round(QUOTE_FONT_SIZE * 0.5); // 18
+const LINE_PX = Math.round(QUOTE_FONT_SIZE * 1.32); // 48
+
+export type PlaceQuoteOptions = {
+  /** Insert the italic source jump-link beneath the quote. Default true;
+   * quotes without an on-device source never get one regardless. */
+  includeLink?: boolean;
+  /** Skip the per-quote save — batch callers save once at the end. */
+  skipSave?: boolean;
+  /** Report 'page-full' instead of clamping into content at the page top. */
+  strictFit?: boolean;
+};
+
 /**
  * Places a quote on the CURRENT note page: an editable text box with the
- * quote, then a jump link back to the source beneath it. Inserts are
+ * quote, optionally followed by a jump link back to the source. Inserts are
  * sequential — parallel insert calls freeze the device (see sn-query notes).
  */
 export async function insertQuoteIntoCurrentNote(
   quote: ShelfQuote,
-): Promise<void> {
+  options: PlaceQuoteOptions = {},
+): Promise<'placed' | 'page-full'> {
   const current = await getCurrentTarget();
   if (current.kind !== 'note') {
     throw new Error(
@@ -113,29 +144,71 @@ export async function insertQuoteIntoCurrentNote(
         ? 2560
         : 1872;
 
+  // Half-page column, anchored left: the right half stays free for
+  // handwriting around the quote and the collision surface halves.
   const left = 180;
-  const textWidth = width - 2 * left;
-  // Rough height from an estimated chars-per-line at fontSize 30.
-  const lines = Math.max(1, Math.ceil(quote.text.length / (textWidth / 16)));
-  const textHeight = Math.min(900, lines * 44 + 24);
+  const textWidth = Math.round(width / 2);
+  const charsPerLine = Math.max(8, Math.floor(textWidth / CHAR_PX));
+  const lines = estimateWrappedLines(quote.text, charsPerLine);
+  // Near-tight frame: the reader re-fits the font to FILL the frame on a
+  // plain lasso move (probe-confirmed), so every pixel of slack becomes
+  // font growth. Small padding only; no safety line.
+  const textHeight = Math.min(1400, lines * LINE_PX + 16);
 
   // Imported quotes (empty sourcePath) have no on-device source, so no
-  // jump link is placed beneath them.
-  const hasSource = quote.sourcePath.length > 0;
+  // jump link is placed beneath them; project quotes can opt out.
+  const withLink =
+    quote.sourcePath.length > 0 && options.includeLink !== false;
 
-  const cursorKey = `${current.path}#${current.page}`;
-  const bottomLimit = placementCursors.get(cursorKey) ?? height - 160;
   const linkHeight = 64;
   const gap = 12;
-  const linkBottom = bottomLimit;
-  const linkTop = hasSource ? linkBottom - linkHeight : linkBottom;
-  const textBottom = hasSource ? linkTop - gap : bottomLimit;
+  const blockHeight = textHeight + (withLink ? gap + linkHeight : 0);
+  const cursorKey = `${current.path}#${current.page}`;
+
+  // Collision-aware placement when a page scan is affordable; blind
+  // bottom-up cursor otherwise. The scan runs once per page per session.
+  let scan = obstacleScans.get(cursorKey);
+  if (scan === undefined) {
+    scan = await scanPageObstacles(current.path, current.page, {
+      width,
+      height,
+    });
+    obstacleScans.set(cursorKey, scan);
+  }
+
+  let linkBottom: number;
+  if (scan) {
+    const found = findPlacementBottom({
+      obstacles: scan.rects,
+      inkBottom: scan.inkBottom,
+      boxLeft: left,
+      boxRight: left + textWidth,
+      boxHeight: blockHeight,
+      startBottom: height - 160,
+      topLimit: 120,
+      gap: 24,
+    });
+    if (found === null) {
+      // Never place on top of existing content when we can see it.
+      return 'page-full';
+    }
+    linkBottom = found;
+  } else {
+    const bottomLimit = placementCursors.get(cursorKey) ?? height - 160;
+    if (options.strictFit && bottomLimit - blockHeight < 120) {
+      return 'page-full';
+    }
+    linkBottom = bottomLimit;
+  }
+
+  const linkTop = withLink ? linkBottom - linkHeight : linkBottom;
+  const textBottom = withLink ? linkTop - gap : linkBottom;
   const textTop = Math.max(120, textBottom - textHeight);
 
   const textRes = (await PluginNoteAPI.insertText({
-    textContentFull: `“${quote.text}”`,
+    textContentFull: quote.text,
     textRect: {left, top: textTop, right: left + textWidth, bottom: textBottom},
-    fontSize: 30,
+    fontSize: QUOTE_FONT_SIZE,
     textAlign: 0,
     textBold: 0,
     textItalics: 0,
@@ -147,9 +220,9 @@ export async function insertQuoteIntoCurrentNote(
     throw new Error(textRes?.error?.message ?? 'Could not insert quote text');
   }
 
-  if (hasSource) {
+  if (withLink) {
     const label = `— ${quote.sourceTitle}, ${formatPage(quote.sourcePage)}`;
-    const linkWidth = estimateLinkWidth(label, width);
+    const linkWidth = estimateLinkWidth(label, textWidth);
     const linkRes = (await PluginNoteAPI.insertTextLink({
       category: 0,
       linkType: linkTypeForKind(quote.sourceKind),
@@ -170,13 +243,30 @@ export async function insertQuoteIntoCurrentNote(
     }
   }
 
-  // Next placement on this page stacks above this quote.
+  // Record the placed block so later placements (and batches) stack above
+  // it; the cursor stays maintained for the scanless fallback path.
+  if (scan) {
+    scan.rects.push({
+      left,
+      top: textTop,
+      right: left + textWidth,
+      bottom: linkBottom,
+    });
+  }
   placementCursors.set(cursorKey, textTop - 24);
 
+  if (!options.skipSave) {
+    await saveCurrentNoteQuietly();
+  }
+  return 'placed';
+}
+
+/** Best-effort save; the visible elements usually exist immediately. */
+export async function saveCurrentNoteQuietly(): Promise<void> {
   try {
     await PluginNoteAPI.saveCurrentNote();
   } catch {
-    // The visible elements usually exist immediately; save is best-effort.
+    // Best effort.
   }
 }
 
@@ -188,7 +278,7 @@ export async function insertShelfLink(target: ShelfTarget): Promise<void> {
 
   const pageWidth = await deviceWidth();
   const label = `SN Shelf: ${target.title} (${formatPage(target.page)})`;
-  const width = estimateLinkWidth(label, pageWidth);
+  const width = estimateLinkWidth(label, pageWidth - 440);
   const left = 220;
   const top = 220;
   const height = 72;
