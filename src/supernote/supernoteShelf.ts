@@ -94,7 +94,11 @@ export async function insertQuoteIntoCurrentNote(
 ): Promise<void> {
   const current = await getCurrentTarget();
   if (current.kind !== 'note') {
-    throw new Error('Open the working note page before placing a quote.');
+    throw new Error(
+      quote.sourcePath.length > 0
+        ? 'Open the working note page before placing a quote.'
+        : 'Open a note page before placing an imported quote.',
+    );
   }
 
   const sizeRes = (await PluginFileAPI.getPageSize(
@@ -115,13 +119,17 @@ export async function insertQuoteIntoCurrentNote(
   const lines = Math.max(1, Math.ceil(quote.text.length / (textWidth / 16)));
   const textHeight = Math.min(900, lines * 44 + 24);
 
+  // Imported quotes (empty sourcePath) have no on-device source, so no
+  // jump link is placed beneath them.
+  const hasSource = quote.sourcePath.length > 0;
+
   const cursorKey = `${current.path}#${current.page}`;
   const bottomLimit = placementCursors.get(cursorKey) ?? height - 160;
   const linkHeight = 64;
   const gap = 12;
   const linkBottom = bottomLimit;
-  const linkTop = linkBottom - linkHeight;
-  const textBottom = linkTop - gap;
+  const linkTop = hasSource ? linkBottom - linkHeight : linkBottom;
+  const textBottom = hasSource ? linkTop - gap : bottomLimit;
   const textTop = Math.max(120, textBottom - textHeight);
 
   const textRes = (await PluginNoteAPI.insertText({
@@ -139,25 +147,27 @@ export async function insertQuoteIntoCurrentNote(
     throw new Error(textRes?.error?.message ?? 'Could not insert quote text');
   }
 
-  const label = `— ${quote.sourceTitle}, ${formatPage(quote.sourcePage)}`;
-  const linkWidth = estimateLinkWidth(label, width);
-  const linkRes = (await PluginNoteAPI.insertTextLink({
-    category: 0,
-    linkType: linkTypeForKind(quote.sourceKind),
-    destPath: normalizeDevicePath(quote.sourcePath),
-    destPage: Math.max(0, quote.sourcePage),
-    style: 0,
-    rect: {left, top: linkTop, right: left + linkWidth, bottom: linkBottom},
-    fontSize: 28,
-    fullText: label,
-    showText: label,
-    isItalic: 1,
-  } as any)) as ApiResponse<number>;
-  if (!linkRes?.success) {
-    throw new Error(
-      linkRes?.error?.message ??
-        'Quote placed, but the source link could not be inserted',
-    );
+  if (hasSource) {
+    const label = `— ${quote.sourceTitle}, ${formatPage(quote.sourcePage)}`;
+    const linkWidth = estimateLinkWidth(label, width);
+    const linkRes = (await PluginNoteAPI.insertTextLink({
+      category: 0,
+      linkType: linkTypeForKind(quote.sourceKind),
+      destPath: normalizeDevicePath(quote.sourcePath),
+      destPage: Math.max(0, quote.sourcePage),
+      style: 0,
+      rect: {left, top: linkTop, right: left + linkWidth, bottom: linkBottom},
+      fontSize: 28,
+      fullText: label,
+      showText: label,
+      isItalic: 1,
+    } as any)) as ApiResponse<number>;
+    if (!linkRes?.success) {
+      throw new Error(
+        linkRes?.error?.message ??
+          'Quote placed, but the source link could not be inserted',
+      );
+    }
   }
 
   // Next placement on this page stacks above this quote.

@@ -43,17 +43,20 @@ import {
   createProjectFromFolder,
   createProjectFromNote,
   getGeneralItems,
+  getInboxQuotes,
   hydrateShelfState,
   listAllPinnedTargets,
   listProjects,
   moveToProject,
   removeProject,
+  removeQuoteFromInbox,
   removeQuoteFromProject,
   resolveShelfContext,
   saveGeneralItems,
   saveProjectReferences,
   setProjectWorkingNote,
 } from '../storage/sessionShelf';
+import {importInboxQuotes} from '../services/quoteInbox';
 import {
   ensureThumbnail,
   pruneThumbnails,
@@ -145,6 +148,7 @@ export function PluginScreen(): React.JSX.Element {
   const [currentTarget, setCurrentTarget] = useState<ShelfTarget | null>(null);
   const [projects, setProjects] = useState<ShelfProject[]>([]);
   const [generalItems, setGeneralItems] = useState<ShelfTarget[]>([]);
+  const [inboxQuotes, setInboxQuotes] = useState<ShelfQuote[]>([]);
   const [detailItem, setDetailItem] = useState<ShelfTarget | null>(null);
   const [detailMeta, setDetailMeta] = useState<ReferenceMeta | null>(null);
   const [detailMetaState, setDetailMetaState] = useState<
@@ -172,6 +176,7 @@ export function PluginScreen(): React.JSX.Element {
     setContext(resolveShelfContext(current?.path ?? null));
     setProjects([...listProjects()]);
     setGeneralItems([...getGeneralItems()]);
+    setInboxQuotes([...getInboxQuotes()]);
   }, []);
 
   const startCapture = useCallback(async () => {
@@ -279,6 +284,46 @@ export function PluginScreen(): React.JSX.Element {
     },
     [refresh],
   );
+
+  const deleteInboxQuote = useCallback(
+    async (quoteId: string) => {
+      removeQuoteFromInbox(quoteId);
+      setStatus('Quote deleted.');
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const placeInboxQuote = useCallback(
+    async (quote: ShelfQuote) => {
+      try {
+        await insertQuoteIntoCurrentNote(quote);
+        removeQuoteFromInbox(quote.id);
+        setStatus('Quote placed on this page.');
+        await refresh();
+        PluginManager.closePluginView();
+      } catch (error) {
+        setStatus(`Could not place quote: ${String(error)}`);
+      }
+    },
+    [refresh],
+  );
+
+  // Opening the Quotes tab drains INBOX/shelf-quote-*.txt into the
+  // imported-quotes inbox (files are deleted once the state is saved).
+  useEffect(() => {
+    if (tab !== 'quotes') {
+      return;
+    }
+    importInboxQuotes()
+      .then(added => {
+        if (added > 0) {
+          setStatus(`Imported ${added} quote${added === 1 ? '' : 's'}.`);
+        }
+        return refresh();
+      })
+      .catch(() => {});
+  }, [tab, refresh]);
 
   const closeDetail = useCallback(() => {
     setDetailItem(null);
@@ -704,10 +749,9 @@ export function PluginScreen(): React.JSX.Element {
       .catch(() => setDetailMetaState('error'));
   }, [detailItem]);
 
-  const totalQuotes = projects.reduce(
-    (sum, project) => sum + project.quotes.length,
-    0,
-  );
+  const totalQuotes =
+    projects.reduce((sum, project) => sum + project.quotes.length, 0) +
+    inboxQuotes.length;
   const currentIsNote = currentTarget?.kind === 'note';
   const currentIsAnchor =
     currentIsNote &&
@@ -1073,6 +1117,49 @@ export function PluginScreen(): React.JSX.Element {
     );
   }
 
+  function renderImportedQuotes(): React.JSX.Element | null {
+    if (inboxQuotes.length === 0) {
+      return null;
+    }
+    return (
+      <View key="quotes-imported">
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Imported</Text>
+          <Text style={styles.count}>{inboxQuotes.length}</Text>
+        </View>
+        <Text style={styles.tapHint}>
+          {currentIsNote
+            ? 'Imported quotes place onto the current page of any note.'
+            : 'Open a note to place imported quotes.'}
+        </Text>
+        {inboxQuotes.map(quote => (
+          <View key={quote.id} style={styles.quoteBox}>
+            <Text numberOfLines={3} style={styles.quoteText}>
+              “{quote.text}”
+            </Text>
+            <Text style={styles.quoteMeta}>
+              — Imported {new Date(quote.capturedAt).toLocaleDateString()}
+            </Text>
+            <View style={styles.actionsRow}>
+              {currentIsNote ? (
+                <Pressable
+                  style={styles.rowButton}
+                  onPress={() => placeInboxQuote(quote)}>
+                  <Text style={styles.rowButtonText}>Place on This Page</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                style={styles.rowButtonSecondary}
+                onPress={() => deleteInboxQuote(quote.id)}>
+                <Text style={styles.rowButtonSecondaryText}>Delete</Text>
+              </Pressable>
+            </View>
+          </View>
+        ))}
+      </View>
+    );
+  }
+
   function renderQuotesTab(): React.JSX.Element {
     const projectsWithQuotes = projects.filter(
       project => project.quotes.length > 0,
@@ -1089,7 +1176,7 @@ export function PluginScreen(): React.JSX.Element {
 
         {status ? <Text style={styles.status}>{status}</Text> : null}
 
-        {projectsWithQuotes.length === 0 ? (
+        {projectsWithQuotes.length === 0 && inboxQuotes.length === 0 ? (
           <View style={styles.emptyBox}>
             <Text style={styles.emptyTitle}>No quotes waiting.</Text>
             <Text style={styles.emptyBody}>
@@ -1098,14 +1185,17 @@ export function PluginScreen(): React.JSX.Element {
             </Text>
           </View>
         ) : (
-          projectsWithQuotes.map(project =>
-            renderProjectQuotes(
-              project,
-              context.kind === 'project' &&
-                context.project.anchorPath === project.anchorPath &&
-                context.isAnchor,
-            ),
-          )
+          <>
+            {renderImportedQuotes()}
+            {projectsWithQuotes.map(project =>
+              renderProjectQuotes(
+                project,
+                context.kind === 'project' &&
+                  context.project.anchorPath === project.anchorPath &&
+                  context.isAnchor,
+              ),
+            )}
+          </>
         )}
       </>
     );

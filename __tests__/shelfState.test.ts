@@ -89,9 +89,27 @@ describe('parsePersistedShelfState', () => {
       headingTexts: {
         '/Note/Working.note': [{key: '0:10:20:300x40', page: 0, text: 'Intro'}],
       },
+      inboxQuotes: [
+        {
+          id: 'shelf-quote-2026-07-07-163836.txt',
+          text: 'An imported quote.',
+          sourcePath: '',
+          sourceTitle: 'Imported',
+          sourcePage: 0,
+          sourceKind: 'other',
+          capturedAt: 3,
+        },
+      ],
     };
 
     expect(parsePersistedShelfState(JSON.stringify(original))).toEqual(original);
+  });
+
+  it('defaults inboxQuotes for states saved before the import feature', () => {
+    const state = parsePersistedShelfState(
+      JSON.stringify({version: 2, general: [], projects: []}),
+    );
+    expect(state.inboxQuotes).toEqual([]);
   });
 
   it('drops malformed entries and clears an active path with no matching project', () => {
@@ -101,6 +119,7 @@ describe('parsePersistedShelfState', () => {
         general: [target({id: 'ok'}), {bogus: true}],
         projects: [{anchorPath: '/Note/A.note', references: [{}], quotes: 'no'}],
         activeAnchorPath: '/Note/Missing.note',
+        inboxQuotes: [{id: 'missing-fields'}],
       }),
     );
 
@@ -108,5 +127,6 @@ describe('parsePersistedShelfState', () => {
     expect(state.projects[0].references).toEqual([]);
     expect(state.projects[0].quotes).toEqual([]);
     expect(state.activeAnchorPath).toBeNull();
+    expect(state.inboxQuotes).toEqual([]);
   });
 });

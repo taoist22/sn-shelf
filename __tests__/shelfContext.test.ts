@@ -27,6 +27,7 @@ function stateWith(overrides: Partial<PersistedShelfState> = {}): PersistedShelf
     projects: [],
     activeAnchorPath: null,
     headingTexts: {},
+    inboxQuotes: [],
     ...overrides,
   };
 }

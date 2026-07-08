@@ -110,6 +110,37 @@ export function setProjectWorkingNote(
   persist();
 }
 
+export function getInboxQuotes(): ShelfQuote[] {
+  return state.inboxQuotes;
+}
+
+/** Adds an imported quote; no-op when its id (filename) is already known. */
+export function addQuoteToInbox(quote: ShelfQuote): boolean {
+  if (state.inboxQuotes.some(entry => entry.id === quote.id)) {
+    return false;
+  }
+  state.inboxQuotes = [quote, ...state.inboxQuotes];
+  return true;
+}
+
+export function removeQuoteFromInbox(quoteId: string): void {
+  state.inboxQuotes = state.inboxQuotes.filter(quote => quote.id !== quoteId);
+  persist();
+}
+
+/**
+ * Awaited persist for callers that must know the state is on disk before
+ * acting (the INBOX importer deletes source files only after a good save).
+ */
+export async function flushShelfState(): Promise<boolean> {
+  try {
+    await savePersistedShelfState(state);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function addQuoteToProject(
   anchorPath: string,
   quote: ShelfQuote,

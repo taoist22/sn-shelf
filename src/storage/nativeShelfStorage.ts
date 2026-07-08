@@ -16,6 +16,8 @@ export type PersistedShelfState = {
   activeAnchorPath: string | null;
   /** OCR results for note headings, keyed by note path. */
   headingTexts: Record<string, HeadingText[]>;
+  /** Quotes imported from INBOX files; not tied to any project. */
+  inboxQuotes: ShelfQuote[];
 };
 
 type ShelfStorageModule = {
@@ -120,6 +122,7 @@ export function emptyShelfState(): PersistedShelfState {
     projects: [],
     activeAnchorPath: null,
     headingTexts: {},
+    inboxQuotes: [],
   };
 }
 
@@ -146,6 +149,7 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
     projects?: unknown;
     activeAnchorPath?: unknown;
     headingTexts?: unknown;
+    inboxQuotes?: unknown;
     items?: unknown;
     returnTarget?: unknown;
   };
@@ -169,6 +173,9 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
       projects,
       activeAnchorPath,
       headingTexts: parseHeadingTexts(value.headingTexts),
+      inboxQuotes: Array.isArray(value.inboxQuotes)
+        ? value.inboxQuotes.filter(isShelfQuote)
+        : [],
     };
   }
 
@@ -197,6 +204,7 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
       ],
       activeAnchorPath: returnTarget.path,
       headingTexts: {},
+      inboxQuotes: [],
     };
   }
 
@@ -206,6 +214,7 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
     projects: [],
     activeAnchorPath: null,
     headingTexts: {},
+    inboxQuotes: [],
   };
 }
 
