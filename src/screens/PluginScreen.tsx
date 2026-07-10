@@ -58,6 +58,8 @@ import {
   setProjectWorkingNote,
 } from '../storage/sessionShelf';
 import {importInboxQuotes} from '../services/quoteInbox';
+import {invalidateObstacleScans} from '../supernote/supernoteShelf';
+import {copyToClipboard} from '../supernote/clipboard';
 import {
   ensureThumbnail,
   pruneThumbnails,
@@ -161,6 +163,7 @@ export function PluginScreen(): React.JSX.Element {
     'idle' | 'loading' | 'error'
   >('idle');
   const [showMoveChooser, setShowMoveChooser] = useState(false);
+  const [showPinChooser, setShowPinChooser] = useState(false);
   const [capture, setCapture] = useState<{
     text: string;
     source: ShelfTarget;
@@ -180,7 +183,7 @@ export function PluginScreen(): React.JSX.Element {
   // glance why placement did not happen. Derived from the message text to
   // keep setStatus a plain state setter for the hooks-deps rule.
   const statusStrong =
-    status.startsWith('No clear space') || status.includes('the page is full');
+    status.startsWith('No room') || status.includes('Turn the page');
 
   const refresh = useCallback(async () => {
     const current = await getCurrentTarget().catch(() => null);
@@ -288,8 +291,10 @@ export function PluginScreen(): React.JSX.Element {
         const result = await insertQuoteIntoCurrentNote(quote, {
           includeLink: includeLinks,
         });
-        if (result === 'page-full') {
-          setStatus('No clear space on this page — turn to a fresh page.');
+        if (result.status === 'page-full') {
+          setStatus(
+            `No room here — this quote needs ~${result.neededLines} lines and the largest clear space fits ~${result.availableLines}. Place Manually or turn the page.`,
+          );
           return;
         }
         removeQuoteFromProject(project.anchorPath, quote.id);
@@ -318,8 +323,10 @@ export function PluginScreen(): React.JSX.Element {
         const result = await insertQuoteIntoCurrentNote(quote, {
           includeLink: includeLinks,
         });
-        if (result === 'page-full') {
-          setStatus('No clear space on this page — turn to a fresh page.');
+        if (result.status === 'page-full') {
+          setStatus(
+            `No room here — this quote needs ~${result.neededLines} lines and the largest clear space fits ~${result.availableLines}. Place Manually or turn the page.`,
+          );
           return;
         }
         removeQuoteFromInbox(quote.id);
@@ -331,6 +338,26 @@ export function PluginScreen(): React.JSX.Element {
       }
     },
     [refresh, includeLinks],
+  );
+
+  // Manual placement: the quote goes to the system clipboard and the user
+  // places it with the native text tool (Paste Text) — exact positioning,
+  // native text box, no source link. Removed from the queue like automatic
+  // placement; kept if the copy fails.
+  const placeQuoteManually = useCallback(
+    async (quote: ShelfQuote, remove: () => void) => {
+      const copied = await copyToClipboard(quote.text);
+      if (!copied) {
+        setStatus('Could not copy — clipboard unavailable.');
+        return;
+      }
+      remove();
+      setStatus(
+        'Quote copied — in your note, open the text tool, tap where it goes, and choose Paste Text. (Manual placement does not include the source link.)',
+      );
+      await refresh();
+    },
+    [refresh],
   );
 
   const toggleQuoteSelected = useCallback((quoteId: string) => {
@@ -373,7 +400,7 @@ export function PluginScreen(): React.JSX.Element {
       return;
     }
     let placed = 0;
-    let pageFull = false;
+    let pageFull: {neededLines: number; availableLines: number} | null = null;
     let failure: string | null = null;
     for (const entry of batch) {
       try {
@@ -382,8 +409,8 @@ export function PluginScreen(): React.JSX.Element {
           skipSave: true,
           strictFit: true,
         });
-        if (result === 'page-full') {
-          pageFull = true;
+        if (result.status === 'page-full') {
+          pageFull = result;
           break;
         }
       } catch (error) {
@@ -404,7 +431,7 @@ export function PluginScreen(): React.JSX.Element {
       setStatus(`Placed ${placed} of ${batch.length}: ${failure}`);
     } else if (pageFull) {
       setStatus(
-        `Placed ${placed} of ${batch.length} — the page is full. Turn the page and place the rest.`,
+        `Placed ${placed} of ${batch.length} — the next quote needs ~${pageFull.neededLines} lines but only ~${pageFull.availableLines} are clear. Turn the page and place the rest.`,
       );
     } else {
       setStatus(`Placed ${placed} quote${placed === 1 ? '' : 's'}.`);
@@ -470,6 +497,7 @@ export function PluginScreen(): React.JSX.Element {
         setCapture(null);
         setDeleteArmedPath(null);
         setSelectedQuoteIds(new Set());
+        setShowPinChooser(false);
         setStatus('');
       },
     });
@@ -483,6 +511,14 @@ export function PluginScreen(): React.JSX.Element {
       setShowMoveChooser(false);
       setCapture(null);
       setSelectedQuoteIds(new Set());
+      setShowPinChooser(false);
+      // Reopening must not show the previous visit's tab or status (the
+      // panel stays mounted, so onStop cannot be relied on for this).
+      setTab('shelf');
+      setStatus('');
+      // The user may have written on pages since the last visit; placement
+      // must see that ink.
+      invalidateObstacleScans();
       refresh();
     });
 
@@ -548,6 +584,37 @@ export function PluginScreen(): React.JSX.Element {
       setStatus(`Could not pin this page: ${String(error)}`);
     }
   }, [context, generalItems, refresh]);
+
+  // Adds the CURRENT file straight to a chosen project's shelf — the
+  // shortcut for "I'm reading something outside the project and want it in".
+  const pinCurrentToProject = useCallback(
+    async (anchorPath: string, anchorTitle: string) => {
+      try {
+        const target = await getCurrentTarget();
+        const project = listProjects().find(
+          entry => entry.anchorPath === anchorPath,
+        );
+        if (!project) {
+          setStatus('That project no longer exists.');
+          setShowPinChooser(false);
+          return;
+        }
+        const next = [
+          target,
+          ...project.references.filter(
+            item => item.path !== target.path || item.page !== target.page,
+          ),
+        ];
+        saveProjectReferences(anchorPath, next);
+        setShowPinChooser(false);
+        setStatus(`Added ${target.title} to ${anchorTitle}.`);
+        await refresh();
+      } catch (error) {
+        setStatus(`Could not add to project: ${String(error)}`);
+      }
+    },
+    [refresh],
+  );
 
   const browseFiles = useCallback(async () => {
     try {
@@ -1238,6 +1305,15 @@ export function PluginScreen(): React.JSX.Element {
               </Pressable>
               <Pressable
                 style={styles.rowButtonSecondary}
+                onPress={() =>
+                  placeQuoteManually(quote, () =>
+                    removeQuoteFromProject(project.anchorPath, quote.id),
+                  )
+                }>
+                <Text style={styles.rowButtonSecondaryText}>Place Manually</Text>
+              </Pressable>
+              <Pressable
+                style={styles.rowButtonSecondary}
                 onPress={() => deleteQuote(project, quote.id)}>
                 <Text style={styles.rowButtonSecondaryText}>Delete</Text>
               </Pressable>
@@ -1299,6 +1375,13 @@ export function PluginScreen(): React.JSX.Element {
               ) : null}
               <Pressable
                 style={styles.rowButtonSecondary}
+                onPress={() =>
+                  placeQuoteManually(quote, () => removeQuoteFromInbox(quote.id))
+                }>
+                <Text style={styles.rowButtonSecondaryText}>Place Manually</Text>
+              </Pressable>
+              <Pressable
+                style={styles.rowButtonSecondary}
                 onPress={() => deleteInboxQuote(quote.id)}>
                 <Text style={styles.rowButtonSecondaryText}>Delete</Text>
               </Pressable>
@@ -1352,6 +1435,11 @@ export function PluginScreen(): React.JSX.Element {
                 <Text style={styles.rowButtonSecondaryText}>Clear</Text>
               </Pressable>
             ) : null}
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => PluginManager.closePluginView()}>
+              <Text style={styles.rowButtonSecondaryText}>Close</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -1387,20 +1475,45 @@ export function PluginScreen(): React.JSX.Element {
   }
 
   function renderCommonActions(): React.JSX.Element {
+    const canPinToProject = context.kind !== 'project' && projects.length > 0;
     return (
-      <View style={styles.actionsRow}>
-        <Pressable style={styles.rowButton} onPress={pinCurrent}>
-          <Text style={styles.rowButtonText}>Pin This Page</Text>
-        </Pressable>
-        <Pressable style={styles.rowButtonSecondary} onPress={browseFiles}>
-          <Text style={styles.rowButtonSecondaryText}>Browse</Text>
-        </Pressable>
-        <Pressable
-          style={styles.rowButtonSecondary}
-          onPress={() => PluginManager.closePluginView()}>
-          <Text style={styles.rowButtonSecondaryText}>Close</Text>
-        </Pressable>
-      </View>
+      <>
+        <View style={styles.actionsRow}>
+          <Pressable style={styles.rowButton} onPress={pinCurrent}>
+            <Text style={styles.rowButtonText}>Pin This Page</Text>
+          </Pressable>
+          {canPinToProject ? (
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => setShowPinChooser(current => !current)}>
+              <Text style={styles.rowButtonSecondaryText}>Add to Project…</Text>
+            </Pressable>
+          ) : null}
+          <Pressable style={styles.rowButtonSecondary} onPress={browseFiles}>
+            <Text style={styles.rowButtonSecondaryText}>Browse</Text>
+          </Pressable>
+          <Pressable
+            style={styles.rowButtonSecondary}
+            onPress={() => PluginManager.closePluginView()}>
+            <Text style={styles.rowButtonSecondaryText}>Close</Text>
+          </Pressable>
+        </View>
+        {canPinToProject && showPinChooser ? (
+          <View style={styles.moveChooser}>
+            <Text style={styles.moveChooserTitle}>Add this file to:</Text>
+            {projects.map(project => (
+              <Pressable
+                key={`pin-${project.anchorPath}`}
+                style={styles.moveChoice}
+                onPress={() =>
+                  pinCurrentToProject(project.anchorPath, project.anchorTitle)
+                }>
+                <Text style={styles.moveChoiceText}>{project.anchorTitle}</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+      </>
     );
   }
 
@@ -1576,6 +1689,13 @@ export function PluginScreen(): React.JSX.Element {
             A project note shows only its own reference shelf. Deleting a
             project moves its references to the general shelf.
           </Text>
+          <View style={styles.actionsRow}>
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => PluginManager.closePluginView()}>
+              <Text style={styles.rowButtonSecondaryText}>Close</Text>
+            </Pressable>
+          </View>
           <View style={styles.workingActions}>
             {currentIsNote && !currentIsAnchor ? (
               <Pressable

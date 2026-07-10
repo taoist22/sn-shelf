@@ -63,6 +63,41 @@ export type PlacementParams = {
 };
 
 /**
+ * Largest obstacle-free vertical run in the box's column, in pixels — used
+ * to tell the user HOW MUCH room exists when a quote doesn't fit.
+ */
+export function largestClearBand(params: {
+  obstacles: Rect[];
+  boxLeft: number;
+  boxRight: number;
+  startBottom: number;
+  topLimit: number;
+}): number {
+  const spans = params.obstacles
+    .filter(
+      obstacle =>
+        obstacle.left < params.boxRight &&
+        obstacle.right > params.boxLeft &&
+        obstacle.bottom > params.topLimit &&
+        obstacle.top < params.startBottom,
+    )
+    .map(obstacle => ({
+      top: Math.max(obstacle.top, params.topLimit),
+      bottom: Math.min(obstacle.bottom, params.startBottom),
+    }))
+    .sort((a, b) => a.top - b.top);
+  let best = 0;
+  let cursor = params.topLimit;
+  for (const span of spans) {
+    if (span.top > cursor) {
+      best = Math.max(best, span.top - cursor);
+    }
+    cursor = Math.max(cursor, span.bottom);
+  }
+  return Math.max(best, params.startBottom - cursor);
+}
+
+/**
  * Finds the lowest bottom edge for a box that clears every obstacle and sits
  * entirely below the handwriting, searching bottom-up. Returns null when the
  * page has no clear band — the caller reports "page full" rather than ever

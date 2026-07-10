@@ -2,6 +2,7 @@ import {describe, expect, it} from '@jest/globals';
 import {
   estimateWrappedLines,
   findPlacementBottom,
+  largestClearBand,
   type Rect,
 } from '../src/domain/quoteLayout';
 
@@ -81,5 +82,32 @@ describe('findPlacementBottom', () => {
       inkBottom: 900,
     });
     expect(result).toBe(1776);
+  });
+});
+
+describe('largestClearBand', () => {
+  const column = {boxLeft: 180, boxRight: 1140, startBottom: 2420, topLimit: 120};
+
+  it('reports the whole column when empty', () => {
+    expect(largestClearBand({...column, obstacles: []})).toBe(2300);
+  });
+
+  it('finds the biggest gap between obstacles', () => {
+    const obstacles: Rect[] = [
+      {left: 0, top: 0, right: 1920, bottom: 600}, // stroke-style
+      {left: 180, top: 1500, right: 1140, bottom: 1700},
+    ];
+    // Gaps: 600→1500 (900) and 1700→2420 (720).
+    expect(largestClearBand({...column, obstacles})).toBe(900);
+  });
+
+  it('ignores obstacles outside the column', () => {
+    const rightHalf: Rect[] = [{left: 1200, top: 0, right: 1920, bottom: 2400}];
+    expect(largestClearBand({...column, obstacles: rightHalf})).toBe(2300);
+  });
+
+  it('reports zero when the column is fully covered', () => {
+    const wall: Rect[] = [{left: 0, top: 0, right: 1920, bottom: 2560}];
+    expect(largestClearBand({...column, obstacles: wall})).toBe(0);
   });
 });

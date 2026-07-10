@@ -15,6 +15,8 @@ public class ShelfNavigationPackage implements ReactPackage {
         List<NativeModule> modules = new ArrayList<>();
         modules.add(new ShelfNavigationModule(reactContext));
         modules.add(new ShelfStorageModule(reactContext));
+        modules.add(new ShelfTextMetricsModule(reactContext));
+        modules.add(new ShelfClipboardModule(reactContext));
         return modules;
     }
 

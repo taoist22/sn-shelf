@@ -51,6 +51,10 @@ Pins land on the shelf you are looking at:
   note's last-used page instead.
 - **Browse** — multi-select file picker (up to 9 at once), starting inside
   the project's folder but free to navigate anywhere.
+- **Add to Project…** — appears when you're reading a file that isn't in
+  any project (and you have at least one project): pins the current page
+  straight into a project you pick, no need to leave the file and re-find
+  it through Browse.
 - Pins made outside any project land on the **General Shelf** and can be
   moved into a project later (long-press → **Move**).
 
@@ -90,9 +94,17 @@ Pins land on the shelf you are looking at:
 4. **Placing several at once**: each placeable quote card shows a
    **Select** button; selected quotes get a **Place N Here** button at the
    top of the tab. Placement is collision-aware — quotes land in the lowest
-   clear space, below your handwriting, never on top of it. When a page has
-   no room, Shelf says so in bold and keeps the rest selected: turn to a
-   fresh page and place again.
+   clear space that avoids both your handwriting and anything already
+   placed, never on top of either. When no such space exists, Shelf says so
+   in bold — how many lines the quote needs vs. the largest clear run it
+   found — and keeps the rest selected: turn to a fresh page and place
+   again, or use Place Manually.
+5. **Place Manually**: copies the quote to the clipboard instead of
+   auto-placing it — open the native text tool, tap exactly where it
+   should go, and choose **Paste Text**. Positioning is entirely yours and
+   the pasted box is immune to the font-refit quirk below, but it does not
+   include the source link, and the quote leaves the queue as soon as the
+   copy succeeds.
 
 ### Send quotes from a computer
 
@@ -128,10 +140,13 @@ no cloud account, no companion app:
   the **edit** option (as if changing bold/size), and drag that tighter
   selection box instead. Shelf sizes its boxes to minimize the effect, but
   the edit-mode move is the only zero-drift way the OS offers.
-- Collision-aware placement reads only lightweight element bounds from the
-  current page and skips very dense pages (falling back to simple
-  bottom-up stacking), so it stays within the platform's element-cache
-  limits.
+- Collision-aware placement reads real bounds for the current page's text,
+  titles, links, pictures, and handwriting (via the stroke contour data the
+  SDK exposes), so quotes land in genuinely clear space rather than a
+  rough estimate. It skips scanning pages that are extremely dense and
+  caps how much handwriting data it reads per page, falling back to simple
+  bottom-up stacking in either case — so it stays within the platform's
+  element-cache limits rather than risk stalling on a very busy page.
 - Shelf state (projects, pins, quotes, recognized headings) persists on the
   device across restarts. It is private to the plugin install.
 - Keywords, stars, and headings are read from notes only — Supernote's
@@ -191,3 +206,6 @@ shelf; `docs/` handoffs track iteration decisions.
 
 - Bookshelf and quote icons created by
   [Freepik - Flaticon](https://www.flaticon.com/free-icons/furniture-and-household).
+- Native text-measurement approach (an Android bridge to `StaticLayout`,
+  plus a device-calibrated text-frame inset) adapted from
+  [tilmanbergt/textboxHelper](https://github.com/tilmanbergt/textboxHelper).

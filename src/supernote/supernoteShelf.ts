@@ -10,8 +10,10 @@ import {
 import {
   estimateWrappedLines,
   findPlacementBottom,
+  largestClearBand,
 } from '../domain/quoteLayout';
 import {scanPageObstacles, type ObstacleScan} from './pageObstacles';
+import {measurePlacedText} from './textMetrics';
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -89,10 +91,16 @@ async function deviceWidth(): Promise<number> {
 // with content at the top. Session-scoped; resets when PluginHost restarts.
 const placementCursors = new Map<string, number>();
 
-// One obstacle scan per page per session (null = scan unavailable, use the
-// blind cursor). Placed quotes are appended so batches stack correctly; ink
-// added mid-session is missed, same staleness the cursor already accepts.
+// One obstacle scan per page per PANEL OPEN (null = scan unavailable, use
+// the blind cursor). Placed quotes are appended so batches stack correctly.
+// The screen invalidates this when the panel reopens so ink written between
+// visits is seen by the next placement.
 const obstacleScans = new Map<string, ObstacleScan | null>();
+
+/** Called when the panel reopens: the user may have written on the page. */
+export function invalidateObstacleScans(): void {
+  obstacleScans.clear();
+}
 
 // Placement font and its metrics, calibrated from a device probe
 // (2026-07-07): after an edit-mode move the reader rewrites the rect to its
@@ -103,6 +111,16 @@ const obstacleScans = new Map<string, ObstacleScan | null>();
 const QUOTE_FONT_SIZE = 36;
 const CHAR_PX = Math.round(QUOTE_FONT_SIZE * 0.5); // 18
 const LINE_PX = Math.round(QUOTE_FONT_SIZE * 1.32); // 48
+
+export type PlaceQuoteResult =
+  | {status: 'placed'}
+  | {
+      status: 'page-full';
+      /** How tall this quote is, in text lines. */
+      neededLines: number;
+      /** The largest clear run in the column, in text lines. */
+      availableLines: number;
+    };
 
 export type PlaceQuoteOptions = {
   /** Insert the italic source jump-link beneath the quote. Default true;
@@ -122,7 +140,7 @@ export type PlaceQuoteOptions = {
 export async function insertQuoteIntoCurrentNote(
   quote: ShelfQuote,
   options: PlaceQuoteOptions = {},
-): Promise<'placed' | 'page-full'> {
+): Promise<PlaceQuoteResult> {
   const current = await getCurrentTarget();
   if (current.kind !== 'note') {
     throw new Error(
@@ -148,12 +166,19 @@ export async function insertQuoteIntoCurrentNote(
   // handwriting around the quote and the collision surface halves.
   const left = 180;
   const textWidth = Math.round(width / 2);
+  // Exact wrap count from the platform's own text layout when the native
+  // module is available (its line HEIGHT differs from the reader's, so we
+  // pair its lineCount with our probe-calibrated LINE_PX); word-wrap
+  // estimate otherwise. The reader re-fits the font to FILL the frame on a
+  // plain lasso move, so slack grows the font and under-sizing shrinks it.
+  const measured = await measurePlacedText(
+    quote.text,
+    textWidth,
+    QUOTE_FONT_SIZE,
+  );
   const charsPerLine = Math.max(8, Math.floor(textWidth / CHAR_PX));
-  const lines = estimateWrappedLines(quote.text, charsPerLine);
-  // Near-tight frame: the reader re-fits the font to FILL the frame on a
-  // plain lasso move (probe-confirmed), so every pixel of slack becomes
-  // font growth. Small padding only; no safety line.
-  const textHeight = Math.min(1400, lines * LINE_PX + 16);
+  const lines = measured?.lineCount ?? estimateWrappedLines(quote.text, charsPerLine);
+  const textHeight = Math.min(1400, lines * LINE_PX + (measured ? 8 : 16));
 
   // Imported quotes (empty sourcePath) have no on-device source, so no
   // jump link is placed beneath them; project quotes can opt out.
@@ -169,10 +194,7 @@ export async function insertQuoteIntoCurrentNote(
   // bottom-up cursor otherwise. The scan runs once per page per session.
   let scan = obstacleScans.get(cursorKey);
   if (scan === undefined) {
-    scan = await scanPageObstacles(current.path, current.page, {
-      width,
-      height,
-    });
+    scan = await scanPageObstacles(current.path, current.page);
     obstacleScans.set(cursorKey, scan);
   }
 
@@ -180,23 +202,39 @@ export async function insertQuoteIntoCurrentNote(
   if (scan) {
     const found = findPlacementBottom({
       obstacles: scan.rects,
-      inkBottom: scan.inkBottom,
+      inkBottom: 0, // strokes are rect obstacles now (contoursSrc bounds)
       boxLeft: left,
       boxRight: left + textWidth,
       boxHeight: blockHeight,
-      startBottom: height - 160,
+      startBottom: height - 140,
       topLimit: 120,
-      gap: 24,
+      gap: 16,
     });
     if (found === null) {
-      // Never place on top of existing content when we can see it.
-      return 'page-full';
+      // Never place on top of existing content when we can see it — but
+      // tell the user how big the quote is vs the room that exists.
+      const band = largestClearBand({
+        obstacles: scan.rects,
+        boxLeft: left,
+        boxRight: left + textWidth,
+        startBottom: height - 140,
+        topLimit: 120,
+      });
+      return {
+        status: 'page-full',
+        neededLines: Math.ceil(blockHeight / LINE_PX),
+        availableLines: Math.max(0, Math.floor(band / LINE_PX)),
+      };
     }
     linkBottom = found;
   } else {
     const bottomLimit = placementCursors.get(cursorKey) ?? height - 160;
     if (options.strictFit && bottomLimit - blockHeight < 120) {
-      return 'page-full';
+      return {
+        status: 'page-full',
+        neededLines: Math.ceil(blockHeight / LINE_PX),
+        availableLines: Math.max(0, Math.floor((bottomLimit - 120) / LINE_PX)),
+      };
     }
     linkBottom = bottomLimit;
   }
@@ -258,7 +296,7 @@ export async function insertQuoteIntoCurrentNote(
   if (!options.skipSave) {
     await saveCurrentNoteQuietly();
   }
-  return 'placed';
+  return {status: 'placed'};
 }
 
 /** Best-effort save; the visible elements usually exist immediately. */
