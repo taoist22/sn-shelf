@@ -1,6 +1,10 @@
 import {FileUtils} from 'sn-plugin-lib';
 import {isImportFileName, quoteFromImportFile} from '../domain/quoteImport';
 import {addQuoteToInbox, flushShelfState} from '../storage/sessionShelf';
+import {
+  ensureFileDeletePermission,
+  ensureFileReadPermission,
+} from '../supernote/pluginPermissions';
 
 const INBOX_DIR = '/storage/emulated/0/INBOX';
 
@@ -11,6 +15,14 @@ const INBOX_DIR = '/storage/emulated/0/INBOX';
  * files are deleted without importing. Returns how many quotes were added.
  */
 export async function importInboxQuotes(): Promise<number> {
+  if (!(await ensureFileReadPermission())) {
+    throw new Error('File access was not allowed.');
+  }
+  if (!(await ensureFileDeletePermission())) {
+    throw new Error(
+      'Delete access was not allowed. Shelf leaves imported source files in INBOX until it can remove them safely.',
+    );
+  }
   const entries = await FileUtils.listFiles(INBOX_DIR).catch(() => null);
   if (!entries || !Array.isArray(entries)) {
     return 0;

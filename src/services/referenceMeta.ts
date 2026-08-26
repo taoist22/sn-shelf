@@ -56,7 +56,7 @@ function delay(ms: number): Promise<void> {
 
 /**
  * Cheap per-note scan: keywords + title identities via the lightweight
- * metadata APIs (both REQUIRE a pageList on sn-plugin-lib 0.1.43; never
+ * metadata APIs (both require an explicit pageList; never
  * getElements here). Titles are merged against the persisted OCR cache, so
  * previously recognized headings show text immediately and new/edited ones
  * surface as unrecognized. Session-cached; pass force to rescan.

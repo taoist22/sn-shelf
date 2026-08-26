@@ -1,5 +1,9 @@
 import {FileUtils, NativePluginManager, PluginFileAPI} from 'sn-plugin-lib';
 import type {ShelfTarget} from '../domain/shelfItem';
+import {
+  ensureFileReadPermission,
+  ensureFileWritePermission,
+} from '../supernote/pluginPermissions';
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -66,6 +70,12 @@ export async function ensureThumbnail(
   }
 
   const task = (async () => {
+    if (!(await ensureFileReadPermission())) {
+      return null;
+    }
+    if (!(await ensureFileWritePermission())) {
+      return null;
+    }
     const dir = await thumbsDir();
     if (!dir) {
       return null;

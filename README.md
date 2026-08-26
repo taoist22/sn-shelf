@@ -6,7 +6,7 @@ https://github.com/user-attachments/assets/cab00cbd-c920-4aa1-b9f1-dff809c2548e
 
 A reference navigator for Supernote e-ink devices. Shelf keeps each
 project's working note and its reference materials one tap apart: pin notes,
-PDFs, and EPUBs to a per-project reference shelf, jump between them, capture
+PDFs, EPUBs, CBZ, XPS, and FB2 files to a per-project reference shelf, jump between them, capture
 quotes from your reading, and place those quotes into your working note with
 a link back to the source.
 
@@ -46,11 +46,11 @@ Note**).
 
 Pins land on the shelf you are looking at:
 
-- **Pin This Page** — pins the current file. Pinning mid-note remembers the
-  exact page; pinning a first page (or adding via Browse) opens at the
-  note's last-used page instead.
+- **Pin This Page** — pins the current file and exact page, including page 1
+  and pages in supported PDF/EPUB/CBZ/XPS/FB2 documents.
 - **Browse** — multi-select file picker (up to 9 at once), starting inside
-  the project's folder but free to navigate anywhere.
+  the project's folder but free to navigate anywhere. Browse additions resume
+  at the file's last-used page because no page was selected when adding them.
 - **Add to Project…** — appears when you're reading a file that isn't in
   any project (and you have at least one project): pins the current page
   straight into a project you pick, no need to leave the file and re-find
@@ -60,9 +60,9 @@ Pins land on the shelf you are looking at:
 
 ### Navigate
 
-- **Tap a card** to open it — notes in the editor, PDFs/EPUBs in the
-  document viewer (at their last-used page; Supernote's viewer does not
-  support page jumps).
+- **Tap a card** to open it at its pinned page. Browse additions and working
+  notes resume at their last-used page. Exact-page opening uses the current
+  Supernote file API for notes and supported document formats.
 - **Tap the project header** to return to the working note at your last-used
   page.
 - **Long-press a card** for the detail view:
@@ -153,9 +153,22 @@ no cloud account, no companion app:
   plugin APIs do not expose them for PDFs/EPUBs.
 - The small gray footer shows which file Shelf detected; tap it to
   re-detect. It remains while some PluginHost platform issues are open.
-- On load, Shelf cleans up stale plugin-version artifacts that PluginHost
-  leaves behind on every install/update (a known platform bug that otherwise
-  grows storage without bound).
+- Shelf requests file access when it needs to browse/open files or build note
+  previews. Delete access is requested when importing `shelf-quote-*.txt`
+  files because the source is removed only after the quote is safely saved.
+
+## Changes in 0.2.5
+
+- Updated to `sn-plugin-lib` 0.1.65 and the current lifecycle listener.
+- Exact-page opening now works for pinned notes, PDFs, EPUBs, CBZ, XPS, and
+  FB2 files; same-file navigation uses the new page-jump API.
+- Browse entries explicitly retain the previous last-used-page behavior, while
+  **Pin This Page** now means the exact page even when it is page 1.
+- Added scoped file permissions and guards against stale refresh/detail results.
+- A quote is no longer left in the queue after its text was inserted but its
+  optional source link failed, preventing duplicate text on retry.
+- Removed Shelf's old plugin-install cleanup workaround now that the current OS
+  cleans superseded plugin cache files itself.
 
 ## Install
 
@@ -192,10 +205,10 @@ src/
   screens/    the plugin panel (tabs, grid, detail, capture)
   domain/     project/context model and pure state logic
   services/   thumbnails (generateNotePng cache), note metadata + heading recognition, INBOX quote import
-  supernote/  Supernote API adapters (navigation intents, capture, inserts)
+  supernote/  Supernote API adapters (SDK-first navigation, capture, inserts)
   storage/    persisted state (native ShelfStorage JSON) and session wrapper
-android/      native modules: ShelfNavigation (open intents), ShelfStorage
-              (state file + PluginHost version cleanup)
+android/      native modules: folder/fallback navigation, state storage,
+              clipboard access, and text measurement
 ```
 
 Design history: [docs/navigation-direction.md](docs/navigation-direction.md)

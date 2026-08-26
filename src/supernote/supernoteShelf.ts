@@ -14,6 +14,7 @@ import {
 } from '../domain/quoteLayout';
 import {scanPageObstacles, type ObstacleScan} from './pageObstacles';
 import {measurePlacedText} from './textMetrics';
+import {ensureFileReadPermission} from './pluginPermissions';
 
 type ApiResponse<T> = {
   success?: boolean;
@@ -39,6 +40,9 @@ export async function getCurrentTarget(): Promise<ShelfTarget> {
 export async function chooseShelfFiles(
   startFolder?: string,
 ): Promise<ShelfTarget[]> {
+  if (!(await ensureFileReadPermission())) {
+    throw new Error('File access was not allowed.');
+  }
   const selected = (await RattaFileSelector.selectFile({
     selectType: 0, // 0 = normal (multi) selection; 1 = single-file mode
     maxNum: 9,
@@ -50,7 +54,7 @@ export async function chooseShelfFiles(
   })) as string[] | null | undefined;
   return (selected ?? [])
     .filter(path => typeof path === 'string' && path.length > 0)
-    .map(path => makeShelfTarget(path, 0));
+    .map(path => makeShelfTarget(path, 0, true));
 }
 
 function linkTypeForKind(kind: ShelfKind): number {
@@ -113,7 +117,7 @@ const CHAR_PX = Math.round(QUOTE_FONT_SIZE * 0.5); // 18
 const LINE_PX = Math.round(QUOTE_FONT_SIZE * 1.32); // 48
 
 export type PlaceQuoteResult =
-  | {status: 'placed'}
+  | {status: 'placed'; warning?: string}
   | {
       status: 'page-full';
       /** How tall this quote is, in text lines. */
@@ -148,6 +152,10 @@ export async function insertQuoteIntoCurrentNote(
         ? 'Open the working note page before placing a quote.'
         : 'Open a note page before placing an imported quote.',
     );
+  }
+  const handwritingRes = (await PluginCommAPI.canHandwrite()) as ApiResponse<boolean>;
+  if (!handwritingRes?.success || !handwritingRes.result) {
+    throw new Error('The current page does not allow note content to be inserted.');
   }
 
   const sizeRes = (await PluginFileAPI.getPageSize(
@@ -258,6 +266,7 @@ export async function insertQuoteIntoCurrentNote(
     throw new Error(textRes?.error?.message ?? 'Could not insert quote text');
   }
 
+  let warning: string | undefined;
   if (withLink) {
     const label = `— ${quote.sourceTitle}, ${formatPage(quote.sourcePage)}`;
     const linkWidth = estimateLinkWidth(label, textWidth);
@@ -274,10 +283,12 @@ export async function insertQuoteIntoCurrentNote(
       isItalic: 1,
     } as any)) as ApiResponse<number>;
     if (!linkRes?.success) {
-      throw new Error(
+      // The editable quote already exists. Report the partial result as
+      // placed so callers remove it from the queue instead of duplicating
+      // the text on retry.
+      warning =
         linkRes?.error?.message ??
-          'Quote placed, but the source link could not be inserted',
-      );
+        'Quote placed, but the source link could not be inserted.';
     }
   }
 
@@ -296,7 +307,7 @@ export async function insertQuoteIntoCurrentNote(
   if (!options.skipSave) {
     await saveCurrentNoteQuietly();
   }
-  return {status: 'placed'};
+  return {status: 'placed', warning};
 }
 
 /** Best-effort save; the visible elements usually exist immediately. */

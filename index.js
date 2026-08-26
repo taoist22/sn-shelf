@@ -1,4 +1,4 @@
-import {AppRegistry, DeviceEventEmitter, Image, NativeModules} from 'react-native';
+import {AppRegistry, DeviceEventEmitter, Image} from 'react-native';
 import App from './App';
 import {name as appName} from './app.json';
 import {PluginManager} from 'sn-plugin-lib';
@@ -48,20 +48,3 @@ PluginManager.registerButtonListener({
     }
   },
 });
-
-// PluginHost never deletes old plugin versions on install/update, so the
-// install dir grows without bound (hundreds of MB after repeated builds).
-// Clean up superseded app_<timestamp> artifacts once at load.
-(async () => {
-  try {
-    const dir = await PluginManager.getPluginDirPath();
-    const result = await NativeModules.ShelfStorage?.cleanupOldVersions(dir);
-    if (result && result.freedBytes > 0) {
-      console.log(
-        `SNShelf cleanup: freed ${(result.freedBytes / 1048576).toFixed(1)} MB, kept app_${result.kept}`,
-      );
-    }
-  } catch (error) {
-    console.warn('SNShelf version cleanup failed', error);
-  }
-})();

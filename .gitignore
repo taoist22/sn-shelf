@@ -2,6 +2,7 @@ node_modules/
 build/
 android/app/build/
 android/.gradle/
+.gradle_home/
 ios/Pods/
 *.log
 .DS_Store

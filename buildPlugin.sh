@@ -673,6 +673,9 @@ main() {
     test_operating_system
 
     local project_root="${1:-$(pwd)}"
+    # Package only from a clean output tree; stale native/config artifacts
+    # can otherwise survive into a new .snplg.
+    rm -rf "$project_root/build/generated" "$project_root/build/outputs"
     get_package_info "$project_root"
 
     if [[ -f "$project_root/tools/patch-metro-watchers.js" ]] && command -v node >/dev/null 2>&1; then

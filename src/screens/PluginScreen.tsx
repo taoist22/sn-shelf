@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   DeviceEventEmitter,
   Image,
@@ -20,9 +20,9 @@ import {
 import {
   fileTitle,
   formatPage,
-  isDocumentKind,
   normalizeDevicePath,
   projectNoteTarget,
+  targetOpensAtLastUsedPage,
   type ShelfProject,
   type ShelfQuote,
   type ShelfTarget,
@@ -60,6 +60,8 @@ import {
 import {importInboxQuotes} from '../services/quoteInbox';
 import {invalidateObstacleScans} from '../supernote/supernoteShelf';
 import {copyToClipboard} from '../supernote/clipboard';
+import {pluginLifecycleAction} from '../supernote/pluginLifecycle';
+import {ensureFileReadPermission} from '../supernote/pluginPermissions';
 import {
   ensureThumbnail,
   pruneThumbnails,
@@ -135,7 +137,7 @@ function ThumbCard(props: {
         </Text>
       ) : null}
       <Text style={styles.cardMeta}>
-        {isDocumentKind(item.kind) || (isNote && item.page === 0)
+        {targetOpensAtLastUsedPage(item)
           ? 'last-used page'
           : formatPage(item.page)}
       </Text>
@@ -178,6 +180,8 @@ export function PluginScreen(): React.JSX.Element {
   const [deleteArmedPath, setDeleteArmedPath] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [isReady, setIsReady] = useState(false);
+  const refreshGeneration = useRef(0);
+  const detailGeneration = useRef(0);
 
   // Page-full statuses render large and bold so the user can tell at a
   // glance why placement did not happen. Derived from the message text to
@@ -186,7 +190,17 @@ export function PluginScreen(): React.JSX.Element {
     status.startsWith('No room') || status.includes('Turn the page');
 
   const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current;
+    if (!(await ensureFileReadPermission())) {
+      if (generation === refreshGeneration.current) {
+        setStatus('File access was not allowed. Grant file access, then reopen Shelf.');
+      }
+      return;
+    }
     const current = await getCurrentTarget().catch(() => null);
+    if (generation !== refreshGeneration.current) {
+      return;
+    }
     setCurrentTarget(current);
     setContext(resolveShelfContext(current?.path ?? null));
     setProjects([...listProjects()]);
@@ -298,7 +312,7 @@ export function PluginScreen(): React.JSX.Element {
           return;
         }
         removeQuoteFromProject(project.anchorPath, quote.id);
-        setStatus('Quote placed on this page.');
+        setStatus(result.warning ?? 'Quote placed on this page.');
         await refresh();
         PluginManager.closePluginView();
       } catch (error) {
@@ -330,7 +344,7 @@ export function PluginScreen(): React.JSX.Element {
           return;
         }
         removeQuoteFromInbox(quote.id);
-        setStatus('Quote placed on this page.');
+        setStatus(result.warning ?? 'Quote placed on this page.');
         await refresh();
         PluginManager.closePluginView();
       } catch (error) {
@@ -400,6 +414,7 @@ export function PluginScreen(): React.JSX.Element {
       return;
     }
     let placed = 0;
+    let linkWarnings = 0;
     let pageFull: {neededLines: number; availableLines: number} | null = null;
     let failure: string | null = null;
     for (const entry of batch) {
@@ -412,6 +427,9 @@ export function PluginScreen(): React.JSX.Element {
         if (result.status === 'page-full') {
           pageFull = result;
           break;
+        }
+        if (result.warning) {
+          linkWarnings += 1;
         }
       } catch (error) {
         failure = String(error);
@@ -434,7 +452,11 @@ export function PluginScreen(): React.JSX.Element {
         `Placed ${placed} of ${batch.length} — the next quote needs ~${pageFull.neededLines} lines but only ~${pageFull.availableLines} are clear. Turn the page and place the rest.`,
       );
     } else {
-      setStatus(`Placed ${placed} quote${placed === 1 ? '' : 's'}.`);
+      setStatus(
+        linkWarnings > 0
+          ? `Placed ${placed} quote${placed === 1 ? '' : 's'}; ${linkWarnings} source link${linkWarnings === 1 ? '' : 's'} could not be inserted.`
+          : `Placed ${placed} quote${placed === 1 ? '' : 's'}.`,
+      );
       PluginManager.closePluginView();
     }
   }, [context, inboxQuotes, selectedQuoteIds, includeLinks, refresh]);
@@ -456,6 +478,7 @@ export function PluginScreen(): React.JSX.Element {
   }, [tab, refresh]);
 
   const closeDetail = useCallback(() => {
+    detailGeneration.current += 1;
     setDetailItem(null);
     setDetailMeta(null);
     setDetailMetaState('idle');
@@ -484,38 +507,38 @@ export function PluginScreen(): React.JSX.Element {
         });
       });
 
-    const sub = PluginManager.addPluginLifeListener({
-      onStart() {
-        refresh();
-      },
-      onStop() {
-        setTab('shelf');
-        setDetailItem(null);
-        setDetailMeta(null);
-        setDetailMetaState('idle');
-        setShowMoveChooser(false);
-        setCapture(null);
-        setDeleteArmedPath(null);
-        setSelectedQuoteIds(new Set());
-        setShowPinChooser(false);
-        setStatus('');
+    const resetPanel = () => {
+      refreshGeneration.current += 1;
+      detailGeneration.current += 1;
+      setTab('shelf');
+      setDetailItem(null);
+      setDetailMeta(null);
+      setDetailMetaState('idle');
+      setShowMoveChooser(false);
+      setCapture(null);
+      setDeleteArmedPath(null);
+      setSelectedQuoteIds(new Set());
+      setShowPinChooser(false);
+      setStatus('');
+    };
+
+    const sub = PluginManager.registerPluginLifeListener({
+      onMsg(message) {
+        const action = pluginLifecycleAction(message);
+        if (action === 'refresh') {
+          refresh();
+        } else if (action === 'reset') {
+          resetPanel();
+        }
       },
     });
 
     // The panel can stay mounted across opens without onStart firing; the
     // toolbar button press (relayed from index.js) always does.
     const openedSub = DeviceEventEmitter.addListener(SHELF_OPENED_EVENT, () => {
-      setDetailItem(null);
-      setDetailMeta(null);
-      setDetailMetaState('idle');
-      setShowMoveChooser(false);
-      setCapture(null);
-      setSelectedQuoteIds(new Set());
-      setShowPinChooser(false);
+      resetPanel();
       // Reopening must not show the previous visit's tab or status (the
       // panel stays mounted, so onStop cannot be relied on for this).
-      setTab('shelf');
-      setStatus('');
       // The user may have written on pages since the last visit; placement
       // must see that ink.
       invalidateObstacleScans();
@@ -539,6 +562,7 @@ export function PluginScreen(): React.JSX.Element {
   }, [refresh, startCapture]);
 
   const openDetail = useCallback((item: ShelfTarget) => {
+    const generation = ++detailGeneration.current;
     setDetailItem(item);
     setDetailMeta(null);
     setShowMoveChooser(false);
@@ -546,10 +570,17 @@ export function PluginScreen(): React.JSX.Element {
       setDetailMetaState('loading');
       scanNoteMeta(item.path)
         .then(meta => {
+          if (generation !== detailGeneration.current) {
+            return;
+          }
           setDetailMeta(meta);
           setDetailMetaState('idle');
         })
-        .catch(() => setDetailMetaState('error'));
+        .catch(() => {
+          if (generation === detailGeneration.current) {
+            setDetailMetaState('error');
+          }
+        });
     } else {
       setDetailMetaState('idle');
     }
@@ -659,13 +690,10 @@ export function PluginScreen(): React.JSX.Element {
 
   const openItem = useCallback(async (target: ShelfTarget) => {
     try {
-      // Page-0 note pins (Browse additions, first-page pins) behave like
-      // documents: resume at the note's own last-used page. Mid-note pins
-      // keep their exact page.
-      const atLastUsed = target.kind === 'note' && target.page === 0;
+      const atLastUsed = targetOpensAtLastUsedPage(target);
       await openShelfTarget(target, {atLastUsedPage: atLastUsed});
       setStatus(
-        atLastUsed || isDocumentKind(target.kind)
+        atLastUsed
           ? `Opening ${target.title} (last-used page).`
           : `Opening ${target.title} ${formatPage(target.page)}.`,
       );
@@ -677,7 +705,7 @@ export function PluginScreen(): React.JSX.Element {
   const openNotePage = useCallback(async (item: ShelfTarget, page: number) => {
     try {
       // Keyword/heading jumps always target their exact page.
-      await openShelfTarget({...item, page});
+      await openShelfTarget({...item, page, openAtLastUsed: false});
       setStatus(`Opening ${item.title} p. ${page + 1}.`);
     } catch (error) {
       setStatus(`Could not open directly: ${String(error)}`);
@@ -967,7 +995,7 @@ export function PluginScreen(): React.JSX.Element {
           <Text style={styles.workingTitle}>{item.title}</Text>
           <Text style={styles.detailMetaLine}>
             {item.kind.toUpperCase()} ·{' '}
-            {isDocumentKind(item.kind)
+            {targetOpensAtLastUsedPage(item)
               ? 'opens last-used page'
               : formatPage(item.page)}
           </Text>

@@ -7,6 +7,7 @@ import {
   makeShelfTarget,
   normalizeDevicePath,
   projectNoteTarget,
+  targetOpensAtLastUsedPage,
 } from '../src/domain/shelfItem';
 import type {ShelfProject} from '../src/domain/shelfItem';
 
@@ -17,6 +18,9 @@ describe('detectShelfKind', () => {
     expect(detectShelfKind('/Document/C.epub')).toBe('epub');
     expect(detectShelfKind('/Document/D.docx')).toBe('document');
     expect(detectShelfKind('/Document/E.doc')).toBe('document');
+    expect(detectShelfKind('/Document/Comic.cbz')).toBe('document');
+    expect(detectShelfKind('/Document/Book.xps')).toBe('document');
+    expect(detectShelfKind('/Document/Novel.fb2')).toBe('document');
     expect(detectShelfKind('/Document/F.txt')).toBe('other');
   });
 });
@@ -71,6 +75,23 @@ describe('makeShelfTarget', () => {
     expect(target.kind).toBe('pdf');
     expect(target.page).toBe(3);
     expect(target.path).toBe('/Document/Book.pdf');
+  });
+});
+
+describe('targetOpensAtLastUsedPage', () => {
+  it('distinguishes Browse entries from exact-page pins', () => {
+    expect(
+      targetOpensAtLastUsedPage(makeShelfTarget('/Document/Book.pdf', 3, true)),
+    ).toBe(true);
+    expect(
+      targetOpensAtLastUsedPage(makeShelfTarget('/Document/Book.pdf', 3)),
+    ).toBe(false);
+  });
+
+  it('preserves legacy persisted behavior when the flag is absent', () => {
+    const legacyDocument = makeShelfTarget('/Document/Book.pdf', 3);
+    delete legacyDocument.openAtLastUsed;
+    expect(targetOpensAtLastUsedPage(legacyDocument)).toBe(true);
   });
 });
 

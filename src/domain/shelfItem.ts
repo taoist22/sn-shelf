@@ -7,6 +7,8 @@ export type ShelfTarget = {
   page: number;
   kind: ShelfKind;
   addedAt: number;
+  /** True for Browse/working-note entries that should resume the file. */
+  openAtLastUsed?: boolean;
 };
 
 export function detectShelfKind(path: string): ShelfKind {
@@ -20,7 +22,13 @@ export function detectShelfKind(path: string): ShelfKind {
   if (lower.endsWith('.epub')) {
     return 'epub';
   }
-  if (lower.endsWith('.doc') || lower.endsWith('.docx')) {
+  if (
+    lower.endsWith('.doc') ||
+    lower.endsWith('.docx') ||
+    lower.endsWith('.cbz') ||
+    lower.endsWith('.xps') ||
+    lower.endsWith('.fb2')
+  ) {
     return 'document';
   }
   return 'other';
@@ -68,7 +76,15 @@ export function projectNoteTarget(project: ShelfProject): ShelfTarget | null {
     project.anchorKind === 'note'
       ? project.anchorTitle
       : project.workingNoteTitle ?? fileTitle(path);
-  return {id: path, path, title, page: 0, kind: 'note', addedAt: 0};
+  return {
+    id: path,
+    path,
+    title,
+    page: 0,
+    kind: 'note',
+    addedAt: 0,
+    openAtLastUsed: true,
+  };
 }
 
 export function normalizeDevicePath(path: string): string {
@@ -93,7 +109,11 @@ export function formatPage(page: number): string {
   return `p. ${Math.max(0, page) + 1}`;
 }
 
-export function makeShelfTarget(path: string, page: number): ShelfTarget {
+export function makeShelfTarget(
+  path: string,
+  page: number,
+  openAtLastUsed = false,
+): ShelfTarget {
   return {
     id: `${path}:${page}:${Date.now()}`,
     path,
@@ -101,5 +121,15 @@ export function makeShelfTarget(path: string, page: number): ShelfTarget {
     page,
     kind: detectShelfKind(path),
     addedAt: Date.now(),
+    openAtLastUsed,
   };
+}
+
+/** Preserves the pre-0.2.5 behavior for persisted pins without the flag. */
+export function targetOpensAtLastUsedPage(target: ShelfTarget): boolean {
+  if (typeof target.openAtLastUsed === 'boolean') {
+    return target.openAtLastUsed;
+  }
+  return isDocumentKind(target.kind) ||
+    (target.kind === 'note' && target.page === 0);
 }
