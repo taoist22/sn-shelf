@@ -1,8 +1,11 @@
 # Handwritten annotations on captured quotes — design note
 
-**Status: not started, not committed to.** Written 2026-09-11 while the reasoning was
-fresh. Deferred because it is a lot of assembly for a small user-visible change; revisit
-when there is a reason to.
+**Status: SUPERSEDED 2026-09-18 — see `quote-ink-placement-design.md`.** The placement
+section below (insertImage, then locate and move the Picture) is no longer the plan:
+sn-strokeprobe proved the ink can be inserted into the note as real strokes, which places
+it exactly where Shelf wants with no image step. The rest is kept for its hazards list.
+
+Original status: not started, not committed to. Written 2026-09-11.
 
 ## The idea
 

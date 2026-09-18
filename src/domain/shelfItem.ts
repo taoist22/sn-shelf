@@ -1,3 +1,5 @@
+import type {QuoteInk} from './quoteInk';
+
 export type ShelfKind = 'note' | 'pdf' | 'epub' | 'document' | 'other';
 
 export type ShelfTarget = {
@@ -46,6 +48,8 @@ export type ShelfQuote = {
   sourcePage: number;
   sourceKind: ShelfKind;
   capturedAt: number;
+  /** Handwritten note written on the capture screen, placed under the quote. */
+  ink?: QuoteInk;
 };
 
 export type ProjectAnchorKind = 'note' | 'folder';
@@ -88,10 +92,13 @@ export function projectNoteTarget(project: ShelfProject): ShelfTarget | null {
 }
 
 export function normalizeDevicePath(path: string): string {
-  if (path.startsWith('/storage/emulated/0/')) {
+  // Preserve absolute paths on every mounted volume, including SD cards.
+  // Older code treated every leading slash as internal-storage-relative and
+  // turned /storage/1234-ABCD/... into /storage/emulated/0/storage/....
+  if (path.startsWith('/storage/')) {
     return path;
   }
-  if (path.startsWith('storage/emulated/0/')) {
+  if (path.startsWith('storage/')) {
     return `/${path}`;
   }
   if (path.startsWith('/')) {

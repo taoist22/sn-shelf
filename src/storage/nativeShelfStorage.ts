@@ -1,5 +1,6 @@
 import {NativeModules} from 'react-native';
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
+import {isQuoteInk} from '../domain/quoteInk';
 import {fileTitle} from '../domain/shelfItem';
 
 export type HeadingText = {
@@ -58,6 +59,21 @@ function isShelfQuote(value: unknown): value is ShelfQuote {
   );
 }
 
+/** Valid quotes only; malformed ink is dropped rather than losing the quote. */
+function parseQuotes(value: unknown): ShelfQuote[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(isShelfQuote).map(quote => {
+    if (quote.ink === undefined || isQuoteInk(quote.ink)) {
+      return quote;
+    }
+    const rest = {...quote};
+    delete rest.ink;
+    return rest;
+  });
+}
+
 function parseProject(value: unknown): ShelfProject | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -84,9 +100,7 @@ function parseProject(value: unknown): ShelfProject | null {
     references: Array.isArray(project.references)
       ? project.references.filter(isShelfTarget)
       : [],
-    quotes: Array.isArray(project.quotes)
-      ? project.quotes.filter(isShelfQuote)
-      : [],
+    quotes: parseQuotes(project.quotes),
   };
 }
 
@@ -173,9 +187,7 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
       projects,
       activeAnchorPath,
       headingTexts: parseHeadingTexts(value.headingTexts),
-      inboxQuotes: Array.isArray(value.inboxQuotes)
-        ? value.inboxQuotes.filter(isShelfQuote)
-        : [],
+      inboxQuotes: parseQuotes(value.inboxQuotes),
     };
   }
 

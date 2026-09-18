@@ -4,11 +4,21 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Environment;
 
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.WritableArray;
+import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.bridge.WritableNativeArray;
+import com.facebook.react.bridge.WritableNativeMap;
+
+import java.io.File;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 
 public class ShelfNavigationModule extends ReactContextBaseJavaModule {
     private final ReactApplicationContext reactContext;
@@ -21,6 +31,102 @@ public class ShelfNavigationModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return "ShelfNavigation";
+    }
+
+    /** Mounted user-storage roots without relying on a currently attached Activity. */
+    @ReactMethod
+    public void getStorageRoots(Promise promise) {
+        try {
+            LinkedHashSet<String> roots = new LinkedHashSet<>();
+            File primary = Environment.getExternalStorageDirectory();
+            if (primary != null) roots.add(primary.getAbsolutePath());
+            File[] appDirs = reactContext.getExternalFilesDirs(null);
+            if (appDirs != null) {
+                for (File appDir : appDirs) {
+                    if (appDir == null) continue;
+                    String path = appDir.getAbsolutePath();
+                    int androidSegment = path.indexOf("/Android/");
+                    if (androidSegment > 0) roots.add(path.substring(0, androidSegment));
+                }
+            }
+            WritableArray result = new WritableNativeArray();
+            for (String root : roots) result.pushString(root);
+            promise.resolve(result);
+        } catch (Throwable error) {
+            promise.reject("SHELF_STORAGE_ROOTS_FAILED", error);
+        }
+    }
+
+    /** Lists one directory level for Shelf's folder-project picker. */
+    @ReactMethod
+    public void listFolderEntries(String folderPath, Promise promise) {
+        if (folderPath == null || folderPath.trim().isEmpty()) {
+            promise.reject("SHELF_NAVIGATION_BAD_PATH", "folderPath is required");
+            return;
+        }
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                promise.reject("SHELF_FOLDER_NOT_FOUND", "Folder is unavailable: " + folderPath);
+                return;
+            }
+            File[] children = folder.listFiles();
+            if (children == null) {
+                promise.reject("SHELF_FOLDER_READ_FAILED", "Could not read folder: " + folderPath);
+                return;
+            }
+            Arrays.sort(children, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
+            WritableArray result = new WritableNativeArray();
+            for (File child : children) {
+                String name = child.getName();
+                if (!child.isDirectory() || name.startsWith(".") || name.toLowerCase().endsWith(".note")) continue;
+                WritableMap entry = new WritableNativeMap();
+                entry.putString("name", name);
+                entry.putString("path", child.getAbsolutePath());
+                result.pushMap(entry);
+            }
+            promise.resolve(result);
+        } catch (Throwable error) {
+            promise.reject("SHELF_FOLDER_READ_FAILED", error);
+        }
+    }
+
+    /** Lists one directory level of folders and .note files for Shelf's note picker. */
+    @ReactMethod
+    public void listNoteBrowserEntries(String folderPath, Promise promise) {
+        if (folderPath == null || folderPath.trim().isEmpty()) {
+            promise.reject("SHELF_NAVIGATION_BAD_PATH", "folderPath is required");
+            return;
+        }
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                promise.reject("SHELF_FOLDER_NOT_FOUND", "Folder is unavailable: " + folderPath);
+                return;
+            }
+            File[] children = folder.listFiles();
+            if (children == null) {
+                promise.reject("SHELF_FOLDER_READ_FAILED", "Could not read folder: " + folderPath);
+                return;
+            }
+            Arrays.sort(children, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
+            WritableArray result = new WritableNativeArray();
+            for (File child : children) {
+                String name = child.getName();
+                if (name.startsWith(".")) continue;
+                boolean isFolder = child.isDirectory() && !name.toLowerCase().endsWith(".note");
+                boolean isNote = child.isFile() && name.toLowerCase().endsWith(".note");
+                if (!isFolder && !isNote) continue;
+                WritableMap entry = new WritableNativeMap();
+                entry.putString("name", name);
+                entry.putString("path", child.getAbsolutePath());
+                entry.putBoolean("isFolder", isFolder);
+                result.pushMap(entry);
+            }
+            promise.resolve(result);
+        } catch (Throwable error) {
+            promise.reject("SHELF_FOLDER_READ_FAILED", error);
+        }
     }
 
     @ReactMethod

@@ -66,6 +66,15 @@ describe('normalizeDevicePath', () => {
       '/storage/emulated/0/Note/A.note',
     );
   });
+
+  it('preserves absolute and relative SD-card paths', () => {
+    expect(normalizeDevicePath('/storage/1234-ABCD/Projects/A.note')).toBe(
+      '/storage/1234-ABCD/Projects/A.note',
+    );
+    expect(normalizeDevicePath('storage/1234-ABCD/Projects/A.note')).toBe(
+      '/storage/1234-ABCD/Projects/A.note',
+    );
+  });
 });
 
 describe('makeShelfTarget', () => {

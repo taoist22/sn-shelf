@@ -43,6 +43,7 @@ import {
   addQuoteToProject,
   createProjectFromFolder,
   createProjectFromNote,
+  flushShelfState,
   getGeneralItems,
   getInboxQuotes,
   hydrateShelfState,
@@ -59,7 +60,6 @@ import {
 } from '../storage/sessionShelf';
 import {importInboxQuotes} from '../services/quoteInbox';
 import {invalidateObstacleScans} from '../supernote/supernoteShelf';
-import {copyToClipboard} from '../supernote/clipboard';
 import {pluginLifecycleAction} from '../supernote/pluginLifecycle';
 import {ensureFileReadPermission} from '../supernote/pluginPermissions';
 import {
@@ -73,6 +73,22 @@ import {
   scanNoteMeta,
   type ReferenceMeta,
 } from '../services/referenceMeta';
+import {FolderProjectPicker} from './FolderProjectPicker';
+import {
+  ShelfInkSurface,
+  activateInk,
+  clearInk,
+  isInkAvailable,
+  readInk,
+  refreshInkRegion,
+  releaseInk,
+} from '../supernote/inkCapture';
+import type {QuoteInk} from '../domain/quoteInk';
+import {
+  PlacementOverlay,
+  type PlacementRequest,
+  type PlacementResult,
+} from './PlacementOverlay';
 
 type TabKey = 'shelf' | 'quotes' | 'projects';
 
@@ -178,16 +194,30 @@ export function PluginScreen(): React.JSX.Element {
     total: number;
   } | null>(null);
   const [deleteArmedPath, setDeleteArmedPath] = useState<string | null>(null);
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [notePickerOpen, setNotePickerOpen] = useState(false);
+  const [placement, setPlacement] = useState<PlacementRequest | null>(null);
+  // Non-null while a placement is running: inserting handwriting takes a few
+  // seconds, and returning to the quote list meanwhile looked like a failure.
+  const [placing, setPlacing] = useState<string | null>(null);
+  // Whether this firmware can run the pen engine; decided per capture.
+  const [inkAvailable, setInkAvailable] = useState(false);
+  // 'off' until the user taps Write a Note; then 'active' or the native
+  // failure reason, shown on screen as-is.
+  const [inkState, setInkState] = useState('off');
   const [status, setStatus] = useState('');
   const [isReady, setIsReady] = useState(false);
   const refreshGeneration = useRef(0);
   const detailGeneration = useRef(0);
 
-  // Page-full statuses render large and bold so the user can tell at a
+  // Placement failures render large and bold so the user can tell at a
   // glance why placement did not happen. Derived from the message text to
   // keep setStatus a plain state setter for the hooks-deps rule.
   const statusStrong =
-    status.startsWith('No room') || status.includes('Turn the page');
+    status.startsWith('No room') ||
+    status.startsWith('Not enough room') ||
+    status.includes('Turn the page') ||
+    status.includes('handwriting could not');
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
@@ -209,6 +239,12 @@ export function PluginScreen(): React.JSX.Element {
   }, []);
 
   const startCapture = useCallback(async () => {
+    // Pressing Capture Quote again also resets a stuck capture screen, and
+    // clears a finished placement's screen (kept while the panel closed).
+    await releaseInk();
+    setInkState('off');
+    setPlacing(null);
+    setPlacement(null);
     try {
       const current = await getCurrentTarget().catch(() => null);
       setCurrentTarget(current);
@@ -232,6 +268,7 @@ export function PluginScreen(): React.JSX.Element {
       } catch {
         // No selection available — the capture field starts empty.
       }
+      setInkAvailable(await isInkAvailable());
       setCapture({
         text,
         source: current,
@@ -256,6 +293,23 @@ export function PluginScreen(): React.JSX.Element {
       setStatus('Choose a project to save this quote to.');
       return;
     }
+    let ink: QuoteInk | undefined;
+    if (inkState === 'active') {
+      try {
+        const read = await readInk();
+        if (read.kind === 'too-large') {
+          setStatus(
+            'The handwritten note is too long to store with the quote. Clear it and write a shorter one.',
+          );
+          return;
+        }
+        ink = read.kind === 'ink' ? read.ink : undefined;
+      } catch (error) {
+        setStatus(`Could not read the handwriting: ${String(error)}`);
+        return;
+      }
+    }
+    await releaseInk();
     const quote: ShelfQuote = {
       id: `q-${Date.now()}`,
       text,
@@ -264,6 +318,7 @@ export function PluginScreen(): React.JSX.Element {
       sourcePage: capture.source.page,
       sourceKind: capture.source.kind,
       capturedAt: Date.now(),
+      ...(ink ? {ink} : {}),
     };
     const saved = addQuoteToProject(capture.projectPath, quote);
     setCapture(null);
@@ -274,7 +329,35 @@ export function PluginScreen(): React.JSX.Element {
     if (saved) {
       PluginManager.closePluginView();
     }
-  }, [capture, refresh]);
+  }, [capture, refresh, inkState]);
+
+  // The pen engine is turned on ONLY from this tap, never on mount. Enabling
+  // it while the capture screen was still drawing (build of 2026-09-18) left
+  // everything outside the writing area undrawn, with taps seemingly reaching
+  // the PDF underneath. The probe and sn-flashcards both enable it on a
+  // settled screen.
+  const startInk = useCallback(async () => {
+    setInkState('starting…');
+    setInkState(await activateInk());
+  }, []);
+
+  const cancelCapture = useCallback(async () => {
+    await releaseInk();
+    setInkState('off');
+    setCapture(null);
+  }, []);
+
+  // Leaving the capture screen by any route releases the engine.
+  const captureOpen = capture !== null;
+  useEffect(() => {
+    if (!captureOpen) {
+      return;
+    }
+    return () => {
+      releaseInk();
+      setInkState('off');
+    };
+  }, [captureOpen]);
 
   const deleteQuote = useCallback(
     async (project: ShelfProject, quoteId: string) => {
@@ -285,42 +368,84 @@ export function PluginScreen(): React.JSX.Element {
     [refresh],
   );
 
-  const placeQuote = useCallback(
-    async (project: ShelfProject, quote: ShelfQuote, isAnchor: boolean) => {
-      if (!isAnchor) {
-        const target = projectNoteTarget(project);
-        if (!target) {
-          setStatus('Set a working note for this project first.');
-          return;
-        }
-        try {
-          await openShelfTarget(target, {atLastUsedPage: true});
-          setStatus('Opening the working note — reopen Shelf there to place.');
-        } catch (error) {
-          setStatus(`Could not open working note: ${String(error)}`);
-        }
+  // Tap-to-place: the panel turns into a transparent overlay over the note
+  // and resolves with the tapped point (page px), or cancelled.
+  const requestTap = useCallback(
+    (label: string) =>
+      new Promise<PlacementResult>(resolve => {
+        setPlacement({label, resolve});
+      }),
+    [],
+  );
+
+  // One quote (project or imported) onto the open note, where the user taps:
+  // text, source link, then the handwritten note. The quote leaves the queue
+  // only once placed — and stays if its handwriting failed to go in, since
+  // Shelf holds the only copy of that ink.
+  const placeQuoteByTap = useCallback(
+    async (quote: ShelfQuote, remove: () => void) => {
+      const outcome = await requestTap(quote.ink ? 'the quote and your note' : 'the quote');
+      setPlacement(null);
+      if (outcome.kind === 'cancelled') {
+        setStatus('Placement cancelled.');
         return;
       }
+      setPlacing('Placing the quote…');
+      let closed = false;
       try {
         const result = await insertQuoteIntoCurrentNote(quote, {
           includeLink: includeLinks,
+          at: outcome.point,
+          onProgress: setPlacing,
         });
-        if (result.status === 'page-full') {
+        if (result.status === 'no-room-here') {
           setStatus(
-            `No room here — this quote needs ~${result.neededLines} lines and the largest clear space fits ~${result.availableLines}. Place Manually or turn the page.`,
+            quote.ink
+              ? 'Not enough room below that spot for the quote and your note — tap higher, or turn the page.'
+              : 'Not enough room below that spot — tap higher, or turn the page.',
           );
-          return;
+        } else if (result.status === 'page-full') {
+          // Only the auto-stacking path reports this; kept for completeness.
+          setStatus('No room on this page — turn the page.');
+        } else {
+          if (!result.inkFailed) {
+            remove();
+          }
+          await refresh();
+          if (result.warning) {
+            setStatus(result.warning);
+          } else {
+            // Stay on the placing screen while the panel closes; the next
+            // open resets it.
+            closed = true;
+            PluginManager.closePluginView();
+          }
         }
-        removeQuoteFromProject(project.anchorPath, quote.id);
-        setStatus(result.warning ?? 'Quote placed on this page.');
-        await refresh();
-        PluginManager.closePluginView();
       } catch (error) {
         setStatus(`Could not place quote: ${String(error)}`);
+      } finally {
+        if (!closed) {
+          // Back to the list, where the status explains what happened.
+          setPlacing(null);
+        }
       }
     },
-    [refresh, includeLinks],
+    [refresh, includeLinks, requestTap],
   );
+
+  // Outside a note, a project quote's main button opens its working note.
+  const openWorkingNote = useCallback(async (project: ShelfProject) => {
+    const target = projectNoteTarget(project);
+    if (!target) {
+      setStatus('Open a note (or use Choose a Note…) to place this quote.');
+      return;
+    }
+    try {
+      await openShelfTarget(target, {atLastUsedPage: true});
+    } catch (error) {
+      setStatus(`Could not open working note: ${String(error)}`);
+    }
+  }, []);
 
   const deleteInboxQuote = useCallback(
     async (quoteId: string) => {
@@ -331,48 +456,20 @@ export function PluginScreen(): React.JSX.Element {
     [refresh],
   );
 
-  const placeInboxQuote = useCallback(
-    async (quote: ShelfQuote) => {
-      try {
-        const result = await insertQuoteIntoCurrentNote(quote, {
-          includeLink: includeLinks,
-        });
-        if (result.status === 'page-full') {
-          setStatus(
-            `No room here — this quote needs ~${result.neededLines} lines and the largest clear space fits ~${result.availableLines}. Place Manually or turn the page.`,
-          );
-          return;
-        }
-        removeQuoteFromInbox(quote.id);
-        setStatus(result.warning ?? 'Quote placed on this page.');
-        await refresh();
-        PluginManager.closePluginView();
-      } catch (error) {
-        setStatus(`Could not place quote: ${String(error)}`);
-      }
-    },
-    [refresh, includeLinks],
-  );
-
-  // Manual placement: the quote goes to the system clipboard and the user
-  // places it with the native text tool (Paste Text) — exact positioning,
-  // native text box, no source link. Removed from the queue like automatic
-  // placement; kept if the copy fails.
-  const placeQuoteManually = useCallback(
-    async (quote: ShelfQuote, remove: () => void) => {
-      const copied = await copyToClipboard(quote.text);
-      if (!copied) {
-        setStatus('Could not copy — clipboard unavailable.');
-        return;
-      }
-      remove();
-      setStatus(
-        'Quote copied — in your note, open the text tool, tap where it goes, and choose Paste Text. (Manual placement does not include the source link.)',
-      );
-      await refresh();
-    },
-    [refresh],
-  );
+  const openChosenNote = useCallback(async (notePath: string) => {
+    await openShelfTarget(
+      {
+        id: `note-picker-${notePath}`,
+        path: notePath,
+        title: fileTitle(notePath),
+        page: 0,
+        kind: 'note',
+        addedAt: Date.now(),
+      },
+      {atLastUsedPage: true},
+    );
+    setNotePickerOpen(false);
+  }, []);
 
   const toggleQuoteSelected = useCallback((quoteId: string) => {
     setSelectedQuoteIds(previous => {
@@ -386,13 +483,13 @@ export function PluginScreen(): React.JSX.Element {
     });
   }, []);
 
-  // Places every selected quote that is placeable on the CURRENT page:
-  // imported quotes on any note, project quotes only on their working note.
+  // Places every selected quote on the CURRENT note page (any note).
   // Inserts stay sequential (parallel inserts freeze the device) and the
   // note is saved once at the end.
   const placeSelected = useCallback(async () => {
-    const anchor =
-      context.kind === 'project' && context.isAnchor ? context.project : null;
+    if (currentTarget?.kind !== 'note') {
+      return;
+    }
     const batch: Array<{quote: ShelfQuote; remove: () => void}> = [
       ...inboxQuotes
         .filter(quote => selectedQuoteIds.has(quote.id))
@@ -400,33 +497,48 @@ export function PluginScreen(): React.JSX.Element {
           quote,
           remove: () => removeQuoteFromInbox(quote.id),
         })),
-      ...(anchor
-        ? anchor.quotes
-            .filter(quote => selectedQuoteIds.has(quote.id))
-            .map(quote => ({
-              quote,
-              remove: () =>
-                removeQuoteFromProject(anchor.anchorPath, quote.id),
-            }))
-        : []),
+      ...projects.flatMap(project =>
+        project.quotes
+          .filter(quote => selectedQuoteIds.has(quote.id))
+          .map(quote => ({
+            quote,
+            remove: () => removeQuoteFromProject(project.anchorPath, quote.id),
+          })),
+      ),
     ];
     if (batch.length === 0) {
       return;
     }
+    setPlacing(`Placing ${batch.length} quote${batch.length === 1 ? '' : 's'}…`);
     let placed = 0;
     let linkWarnings = 0;
+    let inkFailures = 0;
     let pageFull: {neededLines: number; availableLines: number} | null = null;
     let failure: string | null = null;
-    for (const entry of batch) {
+    for (const [index, entry] of batch.entries()) {
+      const prefix = batch.length > 1 ? `Quote ${index + 1} of ${batch.length}: ` : '';
+      setPlacing(`${prefix}Placing the quote…`);
       try {
         const result = await insertQuoteIntoCurrentNote(entry.quote, {
           includeLink: includeLinks,
           skipSave: true,
           strictFit: true,
+          onProgress: message => setPlacing(`${prefix}${message}`),
         });
         if (result.status === 'page-full') {
           pageFull = result;
           break;
+        }
+        if (result.status === 'no-room-here') {
+          // Tap placement only; batches never pass a tap point.
+          break;
+        }
+        if (result.inkFailed) {
+          // Text is on the page but the handwriting is not: keep the quote
+          // so its ink (held only by Shelf) is not lost.
+          inkFailures += 1;
+          placed += 1;
+          continue;
         }
         if (result.warning) {
           linkWarnings += 1;
@@ -445,7 +557,11 @@ export function PluginScreen(): React.JSX.Element {
     }
     await saveCurrentNoteQuietly();
     await refresh();
-    if (failure) {
+    if (inkFailures > 0) {
+      setStatus(
+        `Placed ${placed} of ${batch.length}, but the handwriting could not be inserted for ${inkFailures}. Those quotes stay in Shelf so the handwriting is not lost.`,
+      );
+    } else if (failure) {
       setStatus(`Placed ${placed} of ${batch.length}: ${failure}`);
     } else if (pageFull) {
       setStatus(
@@ -457,9 +573,12 @@ export function PluginScreen(): React.JSX.Element {
           ? `Placed ${placed} quote${placed === 1 ? '' : 's'}; ${linkWarnings} source link${linkWarnings === 1 ? '' : 's'} could not be inserted.`
           : `Placed ${placed} quote${placed === 1 ? '' : 's'}.`,
       );
+      // Stay on the placing screen while the panel closes.
       PluginManager.closePluginView();
+      return;
     }
-  }, [context, inboxQuotes, selectedQuoteIds, includeLinks, refresh]);
+    setPlacing(null);
+  }, [currentTarget, projects, inboxQuotes, selectedQuoteIds, includeLinks, refresh]);
 
   // Opening the Quotes tab drains INBOX/shelf-quote-*.txt into the
   // imported-quotes inbox (files are deleted once the state is saved).
@@ -515,7 +634,11 @@ export function PluginScreen(): React.JSX.Element {
       setDetailMeta(null);
       setDetailMetaState('idle');
       setShowMoveChooser(false);
+      releaseInk();
+      setInkState('off');
       setCapture(null);
+      setPlacement(null);
+      setPlacing(null);
       setDeleteArmedPath(null);
       setSelectedQuoteIds(new Set());
       setShowPinChooser(false);
@@ -803,23 +926,24 @@ export function PluginScreen(): React.JSX.Element {
     }
   }, [refresh]);
 
-  const makeFolderProject = useCallback(async () => {
-    try {
-      const target = await getCurrentTarget();
-      const normalized = normalizeDevicePath(target.path);
-      const slash = normalized.lastIndexOf('/');
-      const folder = slash > 0 ? normalized.slice(0, slash) : '';
-      if (!folder || folder === '/storage/emulated/0') {
-        setStatus('Could not determine a usable folder for this file.');
-        return;
-      }
-      createProjectFromFolder(folder, fileTitle(folder));
-      setStatus(`${fileTitle(folder)} folder is now a project.`);
-      await refresh();
-    } catch (error) {
-      setStatus(`Could not create folder project: ${String(error)}`);
+  const chooseFolderProject = useCallback(async (folder: string) => {
+    createProjectFromFolder(folder, fileTitle(folder));
+    if (!(await flushShelfState())) {
+      throw new Error('Could not save the folder project.');
     }
+    setStatus(`${fileTitle(folder)} folder is now a project.`);
+    await refresh();
+    setFolderPickerOpen(false);
   }, [refresh]);
+
+  const folderPickerStart = (() => {
+    if (!currentTarget?.path) {
+      return '/storage/emulated/0/Note';
+    }
+    const normalized = normalizeDevicePath(currentTarget.path);
+    const slash = normalized.lastIndexOf('/');
+    return slash > 0 ? normalized.slice(0, slash) : '/storage/emulated/0/Note';
+  })();
 
   const recognizeHeadings = useCallback(async () => {
     if (!detailItem || detailItem.kind !== 'note' || !detailMeta) {
@@ -1212,9 +1336,31 @@ export function PluginScreen(): React.JSX.Element {
     );
   }
 
+  function inkStateLabel(): string {
+    if (inkState === 'off') {
+      return 'Optional: tap Write a Note to handwrite about this quote.';
+    }
+    if (inkState === 'active') {
+      return 'Writing on — use the pen in the box below.';
+    }
+    if (inkState === 'starting…') {
+      return 'Starting…';
+    }
+    return `Could not start writing: ${inkState}`;
+  }
+
+  // Capture screen, laid out like sn-flashcards' study screen (proven on
+  // device): the quote where the question would be, and a note section with
+  // ONE row of controls above a fixed-height writing area. The note section
+  // is anchored to the BOTTOM of the panel and the quote box takes whatever
+  // height is left, so nothing above can move the writing area — the pen
+  // engine derives its writable region from where the host is when it binds.
+  // Nothing tappable sits below the writing area (a resting palm).
   function renderCapture(activeCapture: NonNullable<typeof capture>): React.JSX.Element {
+    const writing = inkState === 'active';
     return (
-      <>
+      <View style={styles.captureRoot}>
+        <Text style={styles.title}>Shelf</Text>
         <View style={styles.workingPanel}>
           <Text style={styles.eyebrow}>Capture Quote</Text>
           <Text style={styles.workingTitle}>
@@ -1229,56 +1375,122 @@ export function PluginScreen(): React.JSX.Element {
         </View>
 
         {!activeCapture.projectPath ? (
-          <View style={styles.moveChooser}>
+          <ScrollView style={styles.captureChooser}>
             <Text style={styles.moveChooserTitle}>Save to project:</Text>
             {projects.map(project => (
               <Pressable
                 key={project.anchorPath}
                 style={styles.moveChoice}
-                onPress={() =>
+                onPress={() => {
                   setCapture({
                     ...activeCapture,
                     projectPath: project.anchorPath,
                     projectTitle: project.anchorTitle,
-                  })
-                }>
+                  });
+                  // The chooser disappears, moving everything below it.
+                  if (writing) {
+                    refreshInkRegion();
+                  }
+                }}>
                 <Text style={styles.moveChoiceText}>{project.anchorTitle}</Text>
               </Pressable>
             ))}
-          </View>
+          </ScrollView>
         ) : null}
-
-        <TextInput
-          multiline
-          style={styles.captureInput}
-          value={activeCapture.text}
-          onChangeText={text => setCapture({...activeCapture, text})}
-          placeholder="No text was selected. Select text in the document before capturing, or type the quote here."
-        />
-
-        <View style={styles.actionsRow}>
-          <Pressable style={styles.rowButton} onPress={saveCapture}>
-            <Text style={styles.rowButtonText}>Save Quote</Text>
-          </Pressable>
-          <Pressable
-            style={styles.rowButtonSecondary}
-            onPress={() => setCapture(null)}>
-            <Text style={styles.rowButtonSecondaryText}>Cancel</Text>
-          </Pressable>
-        </View>
 
         {status ? (
           <Text style={statusStrong ? styles.statusStrong : styles.status}>
             {status}
           </Text>
         ) : null}
-      </>
+
+        <View style={[styles.captureSection, styles.captureQuoteSection]}>
+          <Text style={styles.captureHeading}>QUOTE</Text>
+          <TextInput
+            multiline
+            style={styles.captureQuote}
+            value={activeCapture.text}
+            onChangeText={text => setCapture({...activeCapture, text})}
+            // The handwriting keyboard can shift the window; re-read the
+            // writing area's position afterwards (keeps the ink).
+            onBlur={() => {
+              if (writing) {
+                refreshInkRegion();
+              }
+            }}
+            placeholder="No text was selected. Select text in the document before capturing, or type the quote here."
+          />
+        </View>
+
+        <View style={styles.captureSection}>
+          <Text style={styles.captureHeading}>YOUR NOTE</Text>
+          <View style={styles.captureControls}>
+            <Pressable style={styles.rowButton} onPress={saveCapture}>
+              <Text style={styles.rowButtonText}>Save Quote</Text>
+            </Pressable>
+            {inkAvailable ? (
+              writing ? (
+                <Pressable style={styles.rowButtonSecondary} onPress={() => clearInk()}>
+                  <Text style={styles.rowButtonSecondaryText}>Clear Writing</Text>
+                </Pressable>
+              ) : (
+                <Pressable style={styles.rowButtonSecondary} onPress={startInk}>
+                  <Text style={styles.rowButtonSecondaryText}>Write a Note</Text>
+                </Pressable>
+              )
+            ) : null}
+            <Pressable style={styles.rowButtonSecondary} onPress={cancelCapture}>
+              <Text style={styles.rowButtonSecondaryText}>Cancel</Text>
+            </Pressable>
+          </View>
+          {inkAvailable ? (
+            <>
+              <Text numberOfLines={1} style={styles.captureInkHint}>
+                {inkStateLabel()}
+              </Text>
+              <View style={styles.inkBoundary} />
+              <ShelfInkSurface style={styles.captureInk} />
+            </>
+          ) : null}
+        </View>
+      </View>
     );
+  }
+
+  function renderChooseNoteAction(): React.JSX.Element | null {
+    if (currentIsNote) {
+      return null;
+    }
+    return (
+      <Pressable
+        style={styles.rowButtonSecondary}
+        onPress={() => setNotePickerOpen(true)}>
+        <Text style={styles.rowButtonSecondaryText}>Choose a Note…</Text>
+      </Pressable>
+    );
+  }
+
+  function renderSelectToggle(quote: ShelfQuote): React.JSX.Element {
+    const selected = selectedQuoteIds.has(quote.id);
+    return (
+      <Pressable
+        style={selected ? styles.rowButton : styles.rowButtonSecondary}
+        onPress={() => toggleQuoteSelected(quote.id)}>
+        <Text style={selected ? styles.rowButtonText : styles.rowButtonSecondaryText}>
+          {selected ? '✓ Selected' : 'Select'}
+        </Text>
+      </Pressable>
+    );
+  }
+
+  function renderInkNote(quote: ShelfQuote): React.JSX.Element | null {
+    return quote.ink ? (
+      <Text style={styles.quoteMeta}>{'✎ With your handwritten note'}</Text>
+    ) : null;
   }
 
   function renderProjectQuotes(
     project: ShelfProject,
-    isAnchor: boolean,
   ): React.JSX.Element | null {
     if (project.quotes.length === 0) {
       return null;
@@ -1291,9 +1503,11 @@ export function PluginScreen(): React.JSX.Element {
           <Text style={styles.count}>{project.quotes.length}</Text>
         </View>
         <Text style={styles.tapHint}>
-          {noteTarget
-            ? `Quotes place into ${noteTarget.title}, stacked from the bottom of its current page.`
-            : 'Set a working note for this project to place its quotes.'}
+          {currentIsNote
+            ? 'Tap Place, then tap the spot on the page where the quote should start.'
+            : noteTarget
+              ? `Open a note to place quotes — ${noteTarget.title} is this project's working note.`
+              : 'Open a note to place quotes, or use Choose a Note….'}
         </Text>
         {project.quotes.map(quote => (
           <View key={quote.id} style={styles.quoteBox}>
@@ -1303,43 +1517,27 @@ export function PluginScreen(): React.JSX.Element {
             <Text style={styles.quoteMeta}>
               — {quote.sourceTitle}, {formatPage(quote.sourcePage)}
             </Text>
+            {renderInkNote(quote)}
             <View style={styles.actionsRow}>
-              {isAnchor ? (
+              {currentIsNote ? renderSelectToggle(quote) : null}
+              {currentIsNote || noteTarget ? (
                 <Pressable
-                  style={
-                    selectedQuoteIds.has(quote.id)
-                      ? styles.rowButton
-                      : styles.rowButtonSecondary
-                  }
-                  onPress={() => toggleQuoteSelected(quote.id)}>
-                  <Text
-                    style={
-                      selectedQuoteIds.has(quote.id)
-                        ? styles.rowButtonText
-                        : styles.rowButtonSecondaryText
-                    }>
-                    {selectedQuoteIds.has(quote.id) ? '✓ Selected' : 'Select'}
+                  style={styles.rowButton}
+                  onPress={() =>
+                    currentIsNote
+                      ? placeQuoteByTap(quote, () =>
+                          removeQuoteFromProject(project.anchorPath, quote.id),
+                        )
+                      : openWorkingNote(project)
+                  }>
+                  <Text style={styles.rowButtonText}>
+                    {currentIsNote
+                      ? 'Place'
+                      : `Open ${noteTarget?.title ?? 'Working Note'}`}
                   </Text>
                 </Pressable>
               ) : null}
-              <Pressable
-                style={styles.rowButton}
-                onPress={() => placeQuote(project, quote, isAnchor)}>
-                <Text style={styles.rowButtonText}>
-                  {isAnchor
-                    ? 'Place on This Page'
-                    : `Open ${noteTarget?.title ?? 'Working Note'} to Place`}
-                </Text>
-              </Pressable>
-              <Pressable
-                style={styles.rowButtonSecondary}
-                onPress={() =>
-                  placeQuoteManually(quote, () =>
-                    removeQuoteFromProject(project.anchorPath, quote.id),
-                  )
-                }>
-                <Text style={styles.rowButtonSecondaryText}>Place Manually</Text>
-              </Pressable>
+              {renderChooseNoteAction()}
               <Pressable
                 style={styles.rowButtonSecondary}
                 onPress={() => deleteQuote(project, quote.id)}>
@@ -1364,8 +1562,8 @@ export function PluginScreen(): React.JSX.Element {
         </View>
         <Text style={styles.tapHint}>
           {currentIsNote
-            ? 'Imported quotes place onto the current page of any note.'
-            : 'Open a note to place imported quotes.'}
+            ? 'Tap Place, then tap the spot on the page where the quote should start.'
+            : 'Open a note to place imported quotes, or use Choose a Note….'}
         </Text>
         {inboxQuotes.map(quote => (
           <View key={quote.id} style={styles.quoteBox}>
@@ -1375,39 +1573,21 @@ export function PluginScreen(): React.JSX.Element {
             <Text style={styles.quoteMeta}>
               — Imported {new Date(quote.capturedAt).toLocaleDateString()}
             </Text>
+            {renderInkNote(quote)}
             <View style={styles.actionsRow}>
               {currentIsNote ? (
                 <>
-                  <Pressable
-                    style={
-                      selectedQuoteIds.has(quote.id)
-                        ? styles.rowButton
-                        : styles.rowButtonSecondary
-                    }
-                    onPress={() => toggleQuoteSelected(quote.id)}>
-                    <Text
-                      style={
-                        selectedQuoteIds.has(quote.id)
-                          ? styles.rowButtonText
-                          : styles.rowButtonSecondaryText
-                      }>
-                      {selectedQuoteIds.has(quote.id) ? '✓ Selected' : 'Select'}
-                    </Text>
-                  </Pressable>
+                  {renderSelectToggle(quote)}
                   <Pressable
                     style={styles.rowButton}
-                    onPress={() => placeInboxQuote(quote)}>
-                    <Text style={styles.rowButtonText}>Place on This Page</Text>
+                    onPress={() =>
+                      placeQuoteByTap(quote, () => removeQuoteFromInbox(quote.id))
+                    }>
+                    <Text style={styles.rowButtonText}>Place</Text>
                   </Pressable>
                 </>
               ) : null}
-              <Pressable
-                style={styles.rowButtonSecondary}
-                onPress={() =>
-                  placeQuoteManually(quote, () => removeQuoteFromInbox(quote.id))
-                }>
-                <Text style={styles.rowButtonSecondaryText}>Place Manually</Text>
-              </Pressable>
+              {renderChooseNoteAction()}
               <Pressable
                 style={styles.rowButtonSecondary}
                 onPress={() => deleteInboxQuote(quote.id)}>
@@ -1424,22 +1604,21 @@ export function PluginScreen(): React.JSX.Element {
     const projectsWithQuotes = projects.filter(
       project => project.quotes.length > 0,
     );
-    const anchor =
-      context.kind === 'project' && context.isAnchor ? context.project : null;
-    const selectedPlaceable =
-      (currentIsNote
-        ? inboxQuotes.filter(quote => selectedQuoteIds.has(quote.id)).length
-        : 0) +
-      (anchor
-        ? anchor.quotes.filter(quote => selectedQuoteIds.has(quote.id)).length
-        : 0);
+    const selectedPlaceable = currentIsNote
+      ? inboxQuotes.filter(quote => selectedQuoteIds.has(quote.id)).length +
+        projects.reduce(
+          (sum, project) =>
+            sum + project.quotes.filter(quote => selectedQuoteIds.has(quote.id)).length,
+          0,
+        )
+      : 0;
     return (
       <>
         <View style={styles.workingPanel}>
           <Text style={styles.eyebrow}>Quotes</Text>
           <Text style={styles.workingEmpty}>
-            Captured quotes wait here until you place them into their
-            project's working note.
+            Captured quotes wait here until you place them on a note page —
+            any note, not just the project's working note.
           </Text>
           <View style={styles.actionsRow}>
             <Pressable
@@ -1488,14 +1667,7 @@ export function PluginScreen(): React.JSX.Element {
         ) : (
           <>
             {renderImportedQuotes()}
-            {projectsWithQuotes.map(project =>
-              renderProjectQuotes(
-                project,
-                context.kind === 'project' &&
-                  context.project.anchorPath === project.anchorPath &&
-                  context.isAnchor,
-              ),
-            )}
+            {projectsWithQuotes.map(project => renderProjectQuotes(project))}
           </>
         )}
       </>
@@ -1734,15 +1906,11 @@ export function PluginScreen(): React.JSX.Element {
                 </Text>
               </Pressable>
             ) : null}
-            {currentTarget ? (
-              <Pressable
-                style={[styles.button, styles.backButton]}
-                onPress={makeFolderProject}>
-                <Text style={styles.backButtonText}>
-                  Make Current Folder a Project
-                </Text>
-              </Pressable>
-            ) : null}
+            <Pressable
+              style={[styles.button, styles.backButton]}
+              onPress={() => setFolderPickerOpen(true)}>
+              <Text style={styles.backButtonText}>Choose Folder Project…</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -1807,14 +1975,34 @@ export function PluginScreen(): React.JSX.Element {
     );
   }
 
+  if (placement) {
+    // Transparent over the note, so the user can see where they are tapping.
+    return <PlacementOverlay request={placement} />;
+  }
+
+  if (placing) {
+    return (
+      <SafeAreaView style={styles.root}>
+        <View style={styles.placingScreen}>
+          <Text style={styles.placingTitle}>{placing}</Text>
+          <Text style={styles.placingHint}>
+            {'Shelf closes by itself when everything is on the page.'}
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (capture) {
+    return <SafeAreaView style={styles.root}>{renderCapture(capture)}</SafeAreaView>;
+  }
+
   return (
     <SafeAreaView style={styles.root}>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Shelf</Text>
 
-        {capture ? (
-          renderCapture(capture)
-        ) : detailItem ? (
+        {detailItem ? (
           renderDetail(detailItem)
         ) : (
           <>
@@ -1874,6 +2062,21 @@ export function PluginScreen(): React.JSX.Element {
           </Text>
         </Pressable>
       </ScrollView>
+      <FolderProjectPicker
+        visible={folderPickerOpen}
+        initialPath={folderPickerStart}
+        onCancel={() => setFolderPickerOpen(false)}
+        onSelect={chooseFolderProject}
+      />
+      <FolderProjectPicker
+        visible={notePickerOpen}
+        mode="note"
+        initialPath={
+          currentTarget?.kind === 'note' ? folderPickerStart : '/storage/emulated/0/Note'
+        }
+        onCancel={() => setNotePickerOpen(false)}
+        onSelect={openChosenNote}
+      />
     </SafeAreaView>
   );
 }
@@ -2316,6 +2519,88 @@ const styles = StyleSheet.create({
     color: '#202020',
     fontSize: 15,
     fontWeight: '700',
+  },
+  placingScreen: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 32,
+  },
+  placingTitle: {
+    color: '#202020',
+    fontSize: 24,
+    fontWeight: '700',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  placingHint: {
+    color: '#505050',
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  captureRoot: {
+    flex: 1,
+    padding: 16,
+  },
+  // A long project list scrolls on its own instead of squeezing the quote.
+  captureChooser: {
+    flexGrow: 0,
+    marginBottom: 10,
+    maxHeight: 240,
+  },
+  // Takes all height the note section leaves; fixed for the whole visit.
+  captureQuoteSection: {
+    flex: 1,
+    minHeight: 140,
+  },
+  captureSection: {
+    borderColor: '#202020',
+    borderRadius: 6,
+    borderWidth: 2,
+    marginBottom: 10,
+    padding: 10,
+  },
+  captureHeading: {
+    color: '#202020',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  // Fills the quote section; long quotes scroll inside the box.
+  captureQuote: {
+    backgroundColor: '#ffffff',
+    borderColor: '#202020',
+    borderRadius: 6,
+    borderWidth: 1,
+    color: '#202020',
+    flex: 1,
+    fontSize: 17,
+    padding: 10,
+    textAlignVertical: 'top',
+  },
+  captureControls: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginBottom: 6,
+  },
+  captureInkHint: {
+    color: '#505050',
+    fontSize: 13,
+    marginBottom: 6,
+  },
+  // The rule above the writing area is its top edge (sn-flashcards).
+  inkBoundary: {
+    backgroundColor: '#9a9a9a',
+    height: 2,
+  },
+  captureInk: {
+    backgroundColor: '#ffffff',
+    borderColor: '#9a9a9a',
+    borderTopWidth: 0,
+    borderWidth: 1,
+    height: 320,
   },
   captureInput: {
     backgroundColor: '#ffffff',

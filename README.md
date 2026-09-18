@@ -7,8 +7,8 @@ https://github.com/user-attachments/assets/cab00cbd-c920-4aa1-b9f1-dff809c2548e
 A reference navigator for Supernote e-ink devices. Shelf keeps each
 project's working note and its reference materials one tap apart: pin notes,
 PDFs, EPUBs, CBZ, XPS, and FB2 files to a per-project reference shelf, jump between them, capture
-quotes from your reading, and place those quotes into your working note with
-a link back to the source.
+quotes from your reading — with an optional handwritten note about each —
+and place them into any note with a link back to the source.
 
 Built for research, coursework, and any writing that draws on multiple
 sources. Shelf is deliberately **not** a launcher or dashboard — it manages
@@ -37,7 +37,8 @@ the loop between where you write and what you're reading.
 
 Open the note you write in (or any file in a class folder), open Shelf from
 the toolbar, go to the **Projects** tab, and tap **Make Current Note a
-Project** or **Make Current Folder a Project**. For folder projects, open a
+Project**, or **Choose Folder Project…** to browse to any folder (including
+empty folders and SD cards) and make it a project. For folder projects, open a
 note inside the folder and designate it via **Make This the Working Note**
 (later changeable by long-pressing any pinned note's card → **Set as Working
 Note**).
@@ -81,30 +82,38 @@ Pins land on the shelf you are looking at:
 1. In a PDF or EPUB, select text with tap-and-drag; tap **Capture Quote** in
    the selection toolbar. (Rendered document text cannot be lasso-selected —
    that is a firmware limitation, use the text-selection gesture.)
-2. Edit the captured text if needed and save. Captures from a project's
+2. The capture screen shows the quote at the top (editable) and a
+   **Your Note** section at the bottom. To add your own handwritten note
+   about the quote, tap **Write a Note** and write in the white area with
+   the pen — real ink, not converted to text. It is optional; **Clear
+   Writing** starts over. Tap **Save Quote**. Captures from a project's
    materials file automatically; captures from unaffiliated files ask which
-   project to save to.
+   project to save to. (Tapping into the quote text itself brings up the
+   device's handwriting keyboard, which converts writing to text — that is
+   for editing the quote, not for your note.)
 3. The **Quotes** tab (with a live count in its label) lists waiting quotes
-   by project. In the working note, **Place on This Page** inserts the quote
-   as an editable text box — a half-page column, leaving the rest of the
-   line free for your own handwriting — with an italic source link beneath
-   it that jumps back to the source. The **Source links On/Off** toggle at
-   the top of the tab controls the link for everything you place that
-   session. Elsewhere, the button takes you to the working note first.
-4. **Placing several at once**: each placeable quote card shows a
+   by project; ones with a handwritten note are marked **✎**. In **any**
+   note, tap **Place**, then tap the line on the page where the quote should
+   start. Shelf shows a **Placing the quote…** screen while it works (the
+   handwriting takes a few seconds) and closes when done. Top to bottom you
+   get: the quote as an editable text box, an italic source link that jumps
+   back to the source page, and your handwritten note as real ink you can
+   lasso, move, and erase. If the block would not fit below the tapped spot,
+   nothing is inserted and Shelf asks you to tap higher or turn the page.
+   The **Source links On/Off** toggle at the top of the tab controls the link
+   for everything you place that session.
+4. Outside a note (e.g. still in the PDF), a quote offers **Open** *working
+   note* and **Choose a Note…**, a browser for any note on the device.
+5. **Placing several at once**: in a note, each quote card shows a
    **Select** button; selected quotes get a **Place N Here** button at the
-   top of the tab. Placement is collision-aware — quotes land in the lowest
-   clear space that avoids both your handwriting and anything already
-   placed, never on top of either. When no such space exists, Shelf says so
-   in bold — how many lines the quote needs vs. the largest clear run it
-   found — and keeps the rest selected: turn to a fresh page and place
-   again, or use Place Manually.
-5. **Place Manually**: copies the quote to the clipboard instead of
-   auto-placing it — open the native text tool, tap exactly where it
-   should go, and choose **Paste Text**. Positioning is entirely yours and
-   the pasted box is immune to the font-refit quirk below, but it does not
-   include the source link, and the quote leaves the queue as soon as the
-   copy succeeds.
+   top of the tab. This stacks them automatically, collision-aware — quotes
+   land in the lowest clear space that avoids both your handwriting and
+   anything already placed, never on top of either. When no such space
+   exists, Shelf says so in bold — how many lines the quote needs vs. the
+   largest clear run it found — and keeps the rest selected: turn to a fresh
+   page and place again.
+6. If a quote's text is placed but its handwriting cannot be inserted, the
+   quote stays in Shelf so the handwriting is not lost.
 
 ### Send quotes from a computer
 
@@ -156,6 +165,22 @@ no cloud account, no companion app:
 - Shelf requests file access when it needs to browse/open files or build note
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
+
+## Changes in 0.2.6 (unreleased)
+
+- **Handwritten notes on quotes**: write your own note in real ink on the
+  capture screen; it is placed beneath the quote as native strokes.
+- **Tap-to-place**: tap the line where a quote should start, on any note.
+  A **Placing the quote…** screen shows progress until it is done.
+- Quotes place on **any** note, not just the project's working note;
+  **Choose a Note…** browses to one from anywhere.
+- **Fixed**: quote placement was refused on every page since 0.2.5 ("The
+  current page does not allow note content to be inserted"). The check asked
+  the firmware about Shelf's own panel rather than the note beneath it.
+- **Choose Folder Project…** replaces Make Current Folder a Project: browse
+  to any folder, including empty ones and SD cards; SD-card paths are no
+  longer rewritten onto internal storage.
+- Removed **Place Manually** (tap-to-place covers exact positioning).
 
 ## Changes in 0.2.5
 

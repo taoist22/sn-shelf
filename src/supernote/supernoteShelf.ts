@@ -13,6 +13,8 @@ import {
   largestClearBand,
 } from '../domain/quoteLayout';
 import {scanPageObstacles, type ObstacleScan} from './pageObstacles';
+import {insertInkStrokes, invalidateStrokeStyles} from './inkStrokes';
+import {inkScale} from '../domain/quoteInk';
 import {measurePlacedText} from './textMetrics';
 import {ensureFileReadPermission} from './pluginPermissions';
 
@@ -104,6 +106,7 @@ const obstacleScans = new Map<string, ObstacleScan | null>();
 /** Called when the panel reopens: the user may have written on the page. */
 export function invalidateObstacleScans(): void {
   obstacleScans.clear();
+  invalidateStrokeStyles();
 }
 
 // Placement font and its metrics, calibrated from a device probe
@@ -115,9 +118,18 @@ export function invalidateObstacleScans(): void {
 const QUOTE_FONT_SIZE = 36;
 const CHAR_PX = Math.round(QUOTE_FONT_SIZE * 0.5); // 18
 const LINE_PX = Math.round(QUOTE_FONT_SIZE * 1.32); // 48
+// Box top → first baseline, as a multiple of font size (sn-datetime calibration).
+const BASELINE_OFFSET_RATIO = 2.05;
 
 export type PlaceQuoteResult =
-  | {status: 'placed'; warning?: string}
+  | {
+      status: 'placed';
+      warning?: string;
+      /** The text went in but the handwriting did not: the caller must keep
+       * the quote, since Shelf holds the only copy of that ink. */
+      inkFailed?: boolean;
+    }
+  | {status: 'no-room-here'}
   | {
       status: 'page-full';
       /** How tall this quote is, in text lines. */
@@ -134,6 +146,11 @@ export type PlaceQuoteOptions = {
   skipSave?: boolean;
   /** Report 'page-full' instead of clamping into content at the page top. */
   strictFit?: boolean;
+  /** Tap-to-place: top-left of the block in page px. Skips auto-stacking;
+   * a block that would run off the page reports 'no-room-here'. */
+  at?: {x: number; y: number};
+  /** Progress text for the "placing" screen — writing ink takes seconds. */
+  onProgress?: (message: string) => void;
 };
 
 /**
@@ -148,15 +165,13 @@ export async function insertQuoteIntoCurrentNote(
   const current = await getCurrentTarget();
   if (current.kind !== 'note') {
     throw new Error(
-      quote.sourcePath.length > 0
-        ? 'Open the working note page before placing a quote.'
-        : 'Open a note page before placing an imported quote.',
+      'Open a note page before placing a quote.',
     );
   }
-  const handwritingRes = (await PluginCommAPI.canHandwrite()) as ApiResponse<boolean>;
-  if (!handwritingRes?.success || !handwritingRes.result) {
-    throw new Error('The current page does not allow note content to be inserted.');
-  }
+  // No canHandwrite() check: while the Shelf panel is open, the firmware
+  // answers for the PANEL (never writable), not the note beneath it, so the
+  // check refused every placement from v0.2.5 on. sn-datetime hit the same
+  // trap (DateTimePicker.tsx). The note-kind check above is the real guard.
 
   const sizeRes = (await PluginFileAPI.getPageSize(
     current.path,
@@ -195,8 +210,52 @@ export async function insertQuoteIntoCurrentNote(
 
   const linkHeight = 64;
   const gap = 12;
-  const blockHeight = textHeight + (withLink ? gap + linkHeight : 0);
+  const inkGap = 24;
+  const margin = 40;
+  const ink = quote.ink;
+  const inkScaleValue = ink ? inkScale(ink, width - left - margin) : 1;
+  const inkHeight = ink ? Math.round(ink.height * inkScaleValue) : 0;
+  const inkWidth = ink ? Math.round(ink.width * inkScaleValue) : 0;
+  const textBlockHeight = textHeight + (withLink ? gap + linkHeight : 0);
+  const blockHeight = textBlockHeight + (ink ? inkGap + inkHeight : 0);
+  const blockWidth = Math.max(textWidth, inkWidth);
   const cursorKey = `${current.path}#${current.page}`;
+
+  if (options.at) {
+    // The tap marks where the quote starts: x is the block's left edge
+    // (nudged left only if the block would run off the right edge), and the
+    // quote's FIRST BASELINE lands on the tapped line. insertText puts the
+    // baseline ~2.05×fontSize below the box top (calibrated in sn-datetime,
+    // see reference_inserttext_vertical_geometry), so the box starts above
+    // the tap. No stacking or collision checks: the user chose the spot.
+    const tapLeft = Math.round(
+      Math.max(margin, Math.min(options.at.x, width - margin - blockWidth)),
+    );
+    const tapTop = Math.round(
+      Math.max(margin, options.at.y - QUOTE_FONT_SIZE * BASELINE_OFFSET_RATIO),
+    );
+    if (tapTop + blockHeight > height - margin) {
+      return {status: 'no-room-here'};
+    }
+    return insertBlock(quote, {
+      notePath: current.path,
+      page: current.page,
+      pageSize: {width, height},
+      left: tapLeft,
+      textTop: tapTop,
+      textWidth,
+      textHeight,
+      withLink,
+      linkHeight,
+      gap,
+      inkGap,
+      inkScale: inkScaleValue,
+      skipSave: options.skipSave,
+      cursorKey,
+      scan: obstacleScans.get(cursorKey) ?? null,
+      onProgress: options.onProgress,
+    });
+  }
 
   // Collision-aware placement when a page scan is affordable; blind
   // bottom-up cursor otherwise. The scan runs once per page per session.
@@ -212,7 +271,7 @@ export async function insertQuoteIntoCurrentNote(
       obstacles: scan.rects,
       inkBottom: 0, // strokes are rect obstacles now (contoursSrc bounds)
       boxLeft: left,
-      boxRight: left + textWidth,
+      boxRight: left + blockWidth,
       boxHeight: blockHeight,
       startBottom: height - 140,
       topLimit: 120,
@@ -224,7 +283,7 @@ export async function insertQuoteIntoCurrentNote(
       const band = largestClearBand({
         obstacles: scan.rects,
         boxLeft: left,
-        boxRight: left + textWidth,
+        boxRight: left + blockWidth,
         startBottom: height - 140,
         topLimit: 120,
       });
@@ -247,9 +306,56 @@ export async function insertQuoteIntoCurrentNote(
     linkBottom = bottomLimit;
   }
 
-  const linkTop = withLink ? linkBottom - linkHeight : linkBottom;
-  const textBottom = withLink ? linkTop - gap : linkBottom;
-  const textTop = Math.max(120, textBottom - textHeight);
+  // The found bottom is the bottom of the whole block (text, link, ink).
+  const textTop = Math.max(120, linkBottom - blockHeight);
+  return insertBlock(quote, {
+    notePath: current.path,
+    page: current.page,
+    pageSize: {width, height},
+    left,
+    textTop,
+    textWidth,
+    textHeight,
+    withLink,
+    linkHeight,
+    gap,
+    inkGap,
+    inkScale: inkScaleValue,
+    skipSave: options.skipSave,
+    cursorKey,
+    scan,
+    onProgress: options.onProgress,
+  });
+}
+
+type BlockLayout = {
+  notePath: string;
+  page: number;
+  pageSize: {width: number; height: number};
+  left: number;
+  textTop: number;
+  textWidth: number;
+  textHeight: number;
+  withLink: boolean;
+  linkHeight: number;
+  gap: number;
+  inkGap: number;
+  inkScale: number;
+  skipSave?: boolean;
+  cursorKey: string;
+  scan: ObstacleScan | null;
+  onProgress?: (message: string) => void;
+};
+
+/**
+ * Inserts, top to bottom: the quote text, its source link, its handwriting.
+ * Sequential — parallel insert calls freeze the device.
+ */
+async function insertBlock(quote: ShelfQuote, layout: BlockLayout): Promise<PlaceQuoteResult> {
+  const {left, textTop, textWidth, textHeight, withLink, linkHeight, gap} = layout;
+  const textBottom = textTop + textHeight;
+  const linkTop = textBottom + gap;
+  const linkBottom = withLink ? linkTop + linkHeight : textBottom;
 
   const textRes = (await PluginNoteAPI.insertText({
     textContentFull: quote.text,
@@ -266,7 +372,7 @@ export async function insertQuoteIntoCurrentNote(
     throw new Error(textRes?.error?.message ?? 'Could not insert quote text');
   }
 
-  let warning: string | undefined;
+  const warnings: string[] = [];
   if (withLink) {
     const label = `— ${quote.sourceTitle}, ${formatPage(quote.sourcePage)}`;
     const linkWidth = estimateLinkWidth(label, textWidth);
@@ -286,28 +392,59 @@ export async function insertQuoteIntoCurrentNote(
       // The editable quote already exists. Report the partial result as
       // placed so callers remove it from the queue instead of duplicating
       // the text on retry.
-      warning =
+      warnings.push(
         linkRes?.error?.message ??
-        'Quote placed, but the source link could not be inserted.';
+          'Quote placed, but the source link could not be inserted.',
+      );
+    }
+  }
+
+  let blockBottom = linkBottom;
+  let inkFailed = false;
+  if (quote.ink) {
+    const inkTop = linkBottom + layout.inkGap;
+    const inkError = await insertInkStrokes(
+      quote.ink,
+      {x: left, y: inkTop},
+      layout.inkScale,
+      layout.notePath,
+      layout.page,
+      layout.pageSize,
+      (done, total) =>
+        layout.onProgress?.(`Writing your note… ${done} of ${total} strokes`),
+    );
+    if (inkError) {
+      inkFailed = true;
+      warnings.push(
+        `Quote placed, but the handwriting could not be inserted (${inkError}). The quote stays in Shelf so the handwriting is not lost.`,
+      );
+    } else {
+      blockBottom = inkTop + Math.round(quote.ink.height * layout.inkScale);
     }
   }
 
   // Record the placed block so later placements (and batches) stack above
   // it; the cursor stays maintained for the scanless fallback path.
-  if (scan) {
-    scan.rects.push({
+  if (layout.scan) {
+    layout.scan.rects.push({
       left,
       top: textTop,
-      right: left + textWidth,
-      bottom: linkBottom,
+      right:
+        left +
+        Math.max(textWidth, quote.ink ? Math.round(quote.ink.width * layout.inkScale) : 0),
+      bottom: blockBottom,
     });
   }
-  placementCursors.set(cursorKey, textTop - 24);
+  placementCursors.set(layout.cursorKey, textTop - 24);
 
-  if (!options.skipSave) {
+  if (!layout.skipSave) {
     await saveCurrentNoteQuietly();
   }
-  return {status: 'placed', warning};
+  return {
+    status: 'placed',
+    warning: warnings.length ? warnings.join(' ') : undefined,
+    inkFailed,
+  };
 }
 
 /** Best-effort save; the visible elements usually exist immediately. */

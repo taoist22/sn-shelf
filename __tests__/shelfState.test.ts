@@ -130,3 +130,55 @@ describe('parsePersistedShelfState', () => {
     expect(state.inboxQuotes).toEqual([]);
   });
 });
+
+describe('quote ink persistence', () => {
+  const quote = {
+    id: 'q-1',
+    text: 'A passage',
+    sourcePath: '/storage/emulated/0/Document/Book.pdf',
+    sourceTitle: 'Book',
+    sourcePage: 11,
+    sourceKind: 'pdf',
+    capturedAt: 1,
+  };
+  const ink = {
+    version: 1,
+    width: 200,
+    height: 80,
+    lineSpacingPx: 94,
+    strokes: [{xy: [0, 0, 200, 40], press: [0.1, 0.2]}],
+  };
+
+  function stateWith(quotes: unknown[]) {
+    return parsePersistedShelfState(
+      JSON.stringify({
+        version: 2,
+        general: [],
+        projects: [
+          {
+            anchorPath: '/Note/Project.note',
+            anchorTitle: 'Project',
+            anchorKind: 'note',
+            references: [],
+            quotes,
+          },
+        ],
+        inboxQuotes: quotes,
+      }),
+    );
+  }
+
+  it('keeps valid handwriting with project and imported quotes', () => {
+    const state = stateWith([{...quote, ink}]);
+    expect(state.projects[0].quotes[0].ink).toEqual(ink);
+    expect(state.inboxQuotes[0].ink).toEqual(ink);
+  });
+
+  it('drops damaged handwriting but keeps the quote', () => {
+    const state = stateWith([{...quote, ink: {...ink, strokes: [{xy: [1], press: [1, 2]}]}}]);
+    expect(state.projects[0].quotes).toHaveLength(1);
+    expect(state.projects[0].quotes[0].text).toBe('A passage');
+    expect(state.projects[0].quotes[0].ink).toBeUndefined();
+    expect(state.inboxQuotes[0].ink).toBeUndefined();
+  });
+});
