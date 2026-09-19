@@ -195,7 +195,7 @@ no cloud account, no companion app:
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
 
-## Changes in 0.2.6 (unreleased)
+## Changes in 0.2.6
 
 - **Handwritten notes on quotes**: write your own note in real ink on the
   capture screen; it is placed beneath the quote as native strokes.
