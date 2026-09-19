@@ -58,7 +58,7 @@ export function ensureFileReadPermission(): Promise<boolean> {
 export function ensureFileWritePermission(): Promise<boolean> {
   return ensurePluginPermission(
     FILE_WRITE_PERMISSION,
-    'Allow Shelf to create cached previews for pinned notes.',
+    'Allow Shelf to create cached previews for pinned notes and to add pages to PDFs you choose.',
   );
 }
 

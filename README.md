@@ -115,6 +115,35 @@ Pins land on the shelf you are looking at:
 6. If a quote's text is placed but its handwriting cannot be inserted, the
    quote stays in Shelf so the handwriting is not lost.
 
+### Insert pages into a PDF
+
+While reading a PDF, open Shelf and tap **Insert Page…** (PDFs only).
+
+1. Choose **Before** or **After** the page you are on, how many pages
+   (1–20), and a background: **Blank** or **Lined** (8 mm, the same spacing
+   as Supernote's ruled template).
+2. Tap **Insert**. Shelf briefly steps out of the PDF into a note (your
+   project's working note, or the last note Shelf saw), adds the pages,
+   moves your handwriting, and reopens the PDF on the first new page. A
+   progress screen shows each step.
+3. **Your handwriting stays with its pages.** The Supernote stores PDF
+   handwriting by page number, so inserting pages would normally leave
+   everything after the insert point on the wrong pages. Shelf moves each
+   later page's handwriting to its new page number.
+4. **Undo Last Insert** (on the same screen) removes the added pages and
+   moves the handwriting back. If you wrote on the added pages, Shelf asks
+   first — that writing goes with them. Undo is refused if the PDF has
+   changed since.
+5. If anything fails part-way, Shelf puts the PDF and the handwriting back
+   as they were and says so.
+
+Shelf keeps one backup per PDF (the five most recent, up to 30 days) in its
+private storage for undo. Your pins and captured quotes on that PDF are
+moved to the new page numbers. Source links **already placed in notes** keep
+their old page numbers. Shelf needs a note to step out to: if the PDF has no
+project and Shelf has not seen a note yet, open any note and open Shelf there
+once. Locked (encrypted) PDFs cannot be changed.
+
 ### Send quotes from a computer
 
 Text copied on any machine on the same Wi-Fi can land in the Quotes tab —
@@ -181,6 +210,8 @@ no cloud account, no companion app:
   to any folder, including empty ones and SD cards; SD-card paths are no
   longer rewritten onto internal storage.
 - Removed **Place Manually** (tap-to-place covers exact positioning).
+- **Insert Page** for PDFs: 1–20 blank or 8 mm lined pages before/after the
+  current page, with undo — and your handwriting moves with its pages.
 
 ## Changes in 0.2.5
 
@@ -247,3 +278,9 @@ shelf; `docs/` handoffs track iteration decisions.
 - Native text-measurement approach (an Android bridge to `StaticLayout`,
   plus a device-calibrated text-frame inset) adapted from
   [tilmanbergt/textboxHelper](https://github.com/tilmanbergt/textboxHelper).
+- PDF page insertion uses
+  [PDFBox-Android](https://github.com/TomRoush/PdfBox-Android) (Apache License
+  2.0), a port of Apache PDFBox. The approach of editing the PDF with PDFBox
+  and reopening it was studied from the
+  [InsertPage plugin](https://github.com/dersalbader/supernote-PDF-Insert-page);
+  no code was copied.

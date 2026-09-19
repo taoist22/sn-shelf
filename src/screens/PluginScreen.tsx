@@ -57,11 +57,40 @@ import {
   saveGeneralItems,
   saveProjectReferences,
   setProjectWorkingNote,
+  shiftDocumentPages,
 } from '../storage/sessionShelf';
 import {importInboxQuotes} from '../services/quoteInbox';
 import {invalidateObstacleScans} from '../supernote/supernoteShelf';
 import {pluginLifecycleAction} from '../supernote/pluginLifecycle';
-import {ensureFileReadPermission} from '../supernote/pluginPermissions';
+import {
+  ensureFileReadPermission,
+  ensureFileWritePermission,
+} from '../supernote/pluginPermissions';
+import {
+  MAX_INSERT_PAGES,
+  clampInsertCount,
+  pageAfterInsert,
+  pageAfterUndo,
+  planInsertMoves,
+  planUndoMoves,
+  rollbackMoves,
+  type InsertBackground,
+  type InsertPosition,
+  type MarkMove,
+} from '../domain/pdfInsertion';
+import {
+  clearPageMarks,
+  getPdfUndo,
+  insertPdfPages,
+  movePageMarks,
+  pageMarkCount,
+  pdfEditErrorMessage,
+  openFileAndWait,
+  readMarkedPages,
+  undoPdfInsert,
+  type PdfInsertResult,
+  type PdfUndoRecord,
+} from '../supernote/pdfEdit';
 import {
   ensureThumbnail,
   pruneThumbnails,
@@ -91,6 +120,26 @@ import {
 } from './PlacementOverlay';
 
 type TabKey = 'shelf' | 'quotes' | 'projects';
+
+// Insert Page steps out of the PDF into a note while it edits the handwriting.
+const NO_NOTE_MESSAGE =
+  'Shelf needs to step out of this PDF into a note while it works. Open any note, open Shelf there once, then come back to this PDF and try again.';
+
+type PdfInsertState = {
+  path: string;
+  title: string;
+  /** Zero-based page the reader was on. */
+  anchor: number;
+  position: InsertPosition;
+  count: number;
+  background: InsertBackground;
+  undo: PdfUndoRecord | null;
+  /** Shown before inserting when the handwriting could not be read. */
+  warning: string | null;
+  /** Shown before undoing when the added pages have handwriting. */
+  undoWarning: string | null;
+  error: string;
+};
 
 /** Marks the synthetic working-note card — not a real reference entry. */
 const WORKING_CARD_ID = '__working__';
@@ -200,6 +249,7 @@ export function PluginScreen(): React.JSX.Element {
   // Non-null while a placement is running: inserting handwriting takes a few
   // seconds, and returning to the quote list meanwhile looked like a failure.
   const [placing, setPlacing] = useState<string | null>(null);
+  const [pdfInsert, setPdfInsert] = useState<PdfInsertState | null>(null);
   // Whether this firmware can run the pen engine; decided per capture.
   const [inkAvailable, setInkAvailable] = useState(false);
   // 'off' until the user taps Write a Note; then 'active' or the native
@@ -208,6 +258,12 @@ export function PluginScreen(): React.JSX.Element {
   const [status, setStatus] = useState('');
   const [isReady, setIsReady] = useState(false);
   const refreshGeneration = useRef(0);
+  // The last note Shelf saw open this session: where Insert Page steps out to
+  // when the PDF has no project note.
+  const lastNoteRef = useRef<ShelfTarget | null>(null);
+  // True while Insert Page / Undo is stepping between files. Opening another
+  // file can fire lifecycle resets; they must not wipe the progress screen.
+  const pdfOperationRef = useRef(false);
   const detailGeneration = useRef(0);
 
   // Placement failures render large and bold so the user can tell at a
@@ -230,6 +286,9 @@ export function PluginScreen(): React.JSX.Element {
     const current = await getCurrentTarget().catch(() => null);
     if (generation !== refreshGeneration.current) {
       return;
+    }
+    if (current?.kind === 'note') {
+      lastNoteRef.current = current;
     }
     setCurrentTarget(current);
     setContext(resolveShelfContext(current?.path ?? null));
@@ -433,6 +492,285 @@ export function PluginScreen(): React.JSX.Element {
     [refresh, includeLinks, requestTap],
   );
 
+  // ---- Insert pages into the open PDF (docs/pdf-page-insertion-design.md) ----
+
+  const openPdfInsert = useCallback(async () => {
+    try {
+      const current = await getCurrentTarget();
+      if (current.kind !== 'pdf') {
+        setStatus('Insert Page works on PDFs only.');
+        return;
+      }
+      const undo = await getPdfUndo(current.path);
+      setPdfInsert({
+        path: current.path,
+        title: current.title,
+        anchor: Math.max(0, current.page),
+        position: 'after',
+        count: 1,
+        background: 'lined',
+        undo: undo && undo.path === current.path ? undo : null,
+        warning: null,
+        undoWarning: null,
+        error: '',
+      });
+    } catch (error) {
+      setStatus(`Could not read the open PDF: ${String(error)}`);
+    }
+  }, []);
+
+  // Changing any choice drops an earlier warning: it described a different insert.
+  const updatePdfInsert = useCallback((change: Partial<PdfInsertState>) => {
+    setPdfInsert(previous =>
+      previous
+        ? {...previous, ...change, warning: null, undoWarning: null, error: ''}
+        : previous,
+    );
+  }, []);
+
+  // A note to step out to, so the PDF is CLOSED while its handwriting is
+  // edited (the mark calls only write the .mark file for a closed PDF): the
+  // PDF's project note, else the last note seen, else any project's note.
+  const noteToStepOutTo = useCallback((): ShelfTarget | null => {
+    if (context.kind === 'project') {
+      const own = projectNoteTarget(context.project);
+      if (own) {
+        return own;
+      }
+    }
+    if (lastNoteRef.current) {
+      return lastNoteRef.current;
+    }
+    for (const project of projects) {
+      const note = projectNoteTarget(project);
+      if (note) {
+        return note;
+      }
+    }
+    return null;
+  }, [context, projects]);
+
+  // The PDF's handwriting is stored by page number, so after pages go in,
+  // every later page's handwriting moves up to follow its page. That only
+  // sticks with the PDF closed, so Shelf steps out to a note, edits, and
+  // comes back. Any failure puts everything back as it was.
+  const runPdfInsert = useCallback(
+    async (confirmed: boolean) => {
+      const request = pdfInsert;
+      if (!request) {
+        return;
+      }
+      if (!(await ensureFileReadPermission()) || !(await ensureFileWritePermission())) {
+        setPdfInsert({...request, error: 'File access was not allowed, so the PDF was not changed.'});
+        return;
+      }
+      // Read while the PDF is still open: getMarkPages is refused once it is closed.
+      const marked = await readMarkedPages(request.path);
+      if (marked === null && !confirmed) {
+        setPdfInsert({
+          ...request,
+          warning:
+            "Shelf couldn't read this PDF's handwriting, so it can't move it with the pages. Handwriting after the insert point may end up on the wrong pages.",
+          error: '',
+        });
+        return;
+      }
+      const stepOut = noteToStepOutTo();
+      if (!stepOut) {
+        setPdfInsert({...request, warning: null, error: NO_NOTE_MESSAGE});
+        return;
+      }
+
+      pdfOperationRef.current = true;
+      const fail = async (message: string, reopenPdf: boolean) => {
+        if (reopenPdf) {
+          await openFileAndWait(request.path, request.anchor);
+        }
+        pdfOperationRef.current = false;
+        setPlacing(null);
+        setPdfInsert({...request, warning: null, error: message});
+      };
+
+      setPlacing('Closing the PDF…');
+      if (!(await openFileAndWait(stepOut.path, -1))) {
+        await fail(`Couldn't step out of the PDF into ${stepOut.title}, so nothing was changed.`, true);
+        return;
+      }
+
+      const plural = request.count === 1 ? '' : 's';
+      setPlacing(`Adding ${request.count} page${plural} to the PDF…`);
+      let result: PdfInsertResult;
+      try {
+        result = await insertPdfPages(
+          request.path,
+          request.anchor,
+          request.position,
+          request.count,
+          request.background,
+        );
+      } catch (error) {
+        await fail(pdfEditErrorMessage(error), true);
+        return;
+      }
+
+      const moves = marked ? planInsertMoves(marked, result.firstInsertedIndex, result.count) : [];
+      const done: MarkMove[] = [];
+      try {
+        for (const [index, move] of moves.entries()) {
+          setPlacing(`Moving your handwriting… page ${index + 1} of ${moves.length}`);
+          if (await movePageMarks(request.path, move.from, move.to)) {
+            done.push(move);
+          }
+        }
+      } catch (error) {
+        setPlacing('Something went wrong — putting everything back…');
+        let restored = true;
+        for (const back of rollbackMoves(done)) {
+          try {
+            await movePageMarks(request.path, back.from, back.to);
+          } catch {
+            restored = false;
+          }
+        }
+        try {
+          await undoPdfInsert(request.path);
+        } catch {
+          restored = false;
+        }
+        await fail(
+          restored
+            ? `Couldn't move your handwriting (${pdfEditErrorMessage(error)}), so nothing was changed.`
+            : `Couldn't move your handwriting (${pdfEditErrorMessage(error)}), and putting it back also failed. Some handwriting may be on the wrong pages.`,
+          true,
+        );
+        return;
+      }
+
+      shiftDocumentPages(request.path, page =>
+        pageAfterInsert(page, result.firstInsertedIndex, result.count),
+      );
+      await flushShelfState();
+      setPlacing('Opening the new page…');
+      await openFileAndWait(request.path, result.firstInsertedIndex);
+      pdfOperationRef.current = false;
+      PluginManager.closePluginView();
+    },
+    [pdfInsert, noteToStepOutTo],
+  );
+
+  // Reverse of the insert, also with the PDF closed: handwriting on the added
+  // pages goes with them (asked first), later pages' handwriting moves back
+  // down, then the PDF is restored from its backup.
+  const runPdfUndo = useCallback(
+    async (confirmed: boolean) => {
+      const request = pdfInsert;
+      const record = request?.undo;
+      if (!request || !record) {
+        return;
+      }
+      if (record.matches === false) {
+        setPdfInsert({
+          ...request,
+          error: 'This PDF has changed since the pages were added, so it can no longer be undone.',
+        });
+        return;
+      }
+      if (!(await ensureFileReadPermission()) || !(await ensureFileWritePermission())) {
+        setPdfInsert({...request, error: 'File access was not allowed, so nothing was undone.'});
+        return;
+      }
+      const marked = await readMarkedPages(request.path);
+      if (marked === null) {
+        setPdfInsert({
+          ...request,
+          error: "Shelf couldn't read this PDF's handwriting, so undo was not done.",
+        });
+        return;
+      }
+      const plan = planUndoMoves(marked, record.firstInsertedIndex, record.count);
+      const inkedAdded: number[] = [];
+      for (const page of plan.clear) {
+        if ((await pageMarkCount(request.path, page)) > 0) {
+          inkedAdded.push(page);
+        }
+      }
+      if (inkedAdded.length > 0 && !confirmed) {
+        setPdfInsert({
+          ...request,
+          undoWarning: `You wrote on ${inkedAdded.length} of the added page${
+            inkedAdded.length === 1 ? '' : 's'
+          }. Undo removes those pages and that writing.`,
+          error: '',
+        });
+        return;
+      }
+      const stepOut = noteToStepOutTo();
+      if (!stepOut) {
+        setPdfInsert({...request, undoWarning: null, error: NO_NOTE_MESSAGE});
+        return;
+      }
+
+      pdfOperationRef.current = true;
+      setPlacing('Closing the PDF…');
+      if (!(await openFileAndWait(stepOut.path, -1))) {
+        await openFileAndWait(request.path, request.anchor);
+        pdfOperationRef.current = false;
+        setPlacing(null);
+        setPdfInsert({
+          ...request,
+          undoWarning: null,
+          error: `Couldn't step out of the PDF into ${stepOut.title}, so nothing was undone.`,
+        });
+        return;
+      }
+
+      setPlacing('Putting your handwriting back…');
+      const done: MarkMove[] = [];
+      try {
+        for (const page of inkedAdded) {
+          await clearPageMarks(request.path, page);
+        }
+        for (const move of plan.moves) {
+          if (await movePageMarks(request.path, move.from, move.to)) {
+            done.push(move);
+          }
+        }
+        setPlacing('Removing the added pages…');
+        await undoPdfInsert(request.path);
+      } catch (error) {
+        for (const back of rollbackMoves(done)) {
+          try {
+            await movePageMarks(request.path, back.from, back.to);
+          } catch {
+            // reported below
+          }
+        }
+        await openFileAndWait(request.path, request.anchor);
+        pdfOperationRef.current = false;
+        setPlacing(null);
+        setPdfInsert({
+          ...request,
+          undoWarning: null,
+          error: `Undo did not finish (${pdfEditErrorMessage(error)}). The added pages are still in the PDF.`,
+        });
+        return;
+      }
+
+      shiftDocumentPages(request.path, page =>
+        pageAfterUndo(page, record.firstInsertedIndex, record.count, record.originalCount),
+      );
+      await flushShelfState();
+      setPlacing('Reopening the PDF…');
+      await openFileAndWait(
+        request.path,
+        Math.min(record.firstInsertedIndex, record.originalCount - 1),
+      );
+      pdfOperationRef.current = false;
+      PluginManager.closePluginView();
+    },
+    [pdfInsert, noteToStepOutTo],
+  );
+
   // Outside a note, a project quote's main button opens its working note.
   const openWorkingNote = useCallback(async (project: ShelfProject) => {
     const target = projectNoteTarget(project);
@@ -627,6 +965,10 @@ export function PluginScreen(): React.JSX.Element {
       });
 
     const resetPanel = () => {
+      if (pdfOperationRef.current) {
+        // Insert Page / Undo is mid-way between files; it owns the screen.
+        return;
+      }
       refreshGeneration.current += 1;
       detailGeneration.current += 1;
       setTab('shelf');
@@ -639,6 +981,7 @@ export function PluginScreen(): React.JSX.Element {
       setCapture(null);
       setPlacement(null);
       setPlacing(null);
+      setPdfInsert(null);
       setDeleteArmedPath(null);
       setSelectedQuoteIds(new Set());
       setShowPinChooser(false);
@@ -1457,6 +1800,115 @@ export function PluginScreen(): React.JSX.Element {
     );
   }
 
+  function renderChoice(
+    label: string,
+    selected: boolean,
+    onPress: () => void,
+  ): React.JSX.Element {
+    return (
+      <Pressable
+        key={label}
+        style={selected ? styles.rowButton : styles.rowButtonSecondary}
+        onPress={onPress}>
+        <Text style={selected ? styles.rowButtonText : styles.rowButtonSecondaryText}>
+          {label}
+        </Text>
+      </Pressable>
+    );
+  }
+
+  function renderPdfInsert(request: PdfInsertState): React.JSX.Element {
+    const pageLabel = `page ${request.anchor + 1}`;
+    const plural = request.count === 1 ? '' : 's';
+    const undo = request.undo;
+    return (
+      <>
+        <View style={styles.workingPanel}>
+          <Text style={styles.eyebrow}>{'Insert Page'}</Text>
+          <Text style={styles.workingTitle}>{request.title}</Text>
+          <Text style={styles.detailMetaLine}>{`You are on ${pageLabel}.`}</Text>
+        </View>
+
+        <Text style={styles.captureHeading}>{'WHERE'}</Text>
+        <View style={styles.actionsRow}>
+          {renderChoice(`Before ${pageLabel}`, request.position === 'before', () =>
+            updatePdfInsert({position: 'before'}),
+          )}
+          {renderChoice(`After ${pageLabel}`, request.position === 'after', () =>
+            updatePdfInsert({position: 'after'}),
+          )}
+        </View>
+
+        <Text style={styles.captureHeading}>{'PAGES'}</Text>
+        <View style={styles.actionsRow}>
+          <Pressable
+            style={styles.rowButtonSecondary}
+            onPress={() => updatePdfInsert({count: clampInsertCount(request.count - 1)})}>
+            <Text style={styles.rowButtonSecondaryText}>{'−'}</Text>
+          </Pressable>
+          <Text style={styles.pdfInsertCount}>{`${request.count}`}</Text>
+          <Pressable
+            style={styles.rowButtonSecondary}
+            onPress={() => updatePdfInsert({count: clampInsertCount(request.count + 1)})}>
+            <Text style={styles.rowButtonSecondaryText}>{'+'}</Text>
+          </Pressable>
+          <Text style={styles.captureInkHint}>{`Up to ${MAX_INSERT_PAGES} at a time.`}</Text>
+        </View>
+
+        <Text style={styles.captureHeading}>{'BACKGROUND'}</Text>
+        <View style={styles.actionsRow}>
+          {renderChoice('Blank', request.background === 'blank', () =>
+            updatePdfInsert({background: 'blank'}),
+          )}
+          {renderChoice('Lined (8 mm)', request.background === 'lined', () =>
+            updatePdfInsert({background: 'lined'}),
+          )}
+        </View>
+
+        {request.warning ? (
+          <View style={styles.pdfInsertWarning}>
+            <Text style={styles.statusStrong}>{request.warning}</Text>
+          </View>
+        ) : null}
+
+        {request.error ? <Text style={styles.statusStrong}>{request.error}</Text> : null}
+
+        <View style={styles.actionsRow}>
+          <Pressable
+            style={styles.rowButton}
+            onPress={() => runPdfInsert(request.warning !== null)}>
+            <Text style={styles.rowButtonText}>
+              {request.warning ? 'Insert Anyway' : `Insert ${request.count} Page${plural}`}
+            </Text>
+          </Pressable>
+          <Pressable style={styles.rowButtonSecondary} onPress={() => setPdfInsert(null)}>
+            <Text style={styles.rowButtonSecondaryText}>{'Cancel'}</Text>
+          </Pressable>
+        </View>
+
+        {undo ? (
+          <View style={styles.pdfInsertUndo}>
+            <Text style={styles.detailMetaLine}>
+              {`Last insert: ${undo.count} page${undo.count === 1 ? '' : 's'} at page ${
+                undo.firstInsertedIndex + 1
+              }.`}
+            </Text>
+            {request.undoWarning ? (
+              <Text style={styles.statusStrong}>{request.undoWarning}</Text>
+            ) : null}
+            <Pressable
+              style={styles.rowButtonSecondary}
+              onPress={() => runPdfUndo(request.undoWarning !== null)}>
+              <Text style={styles.rowButtonSecondaryText}>
+                {request.undoWarning ? 'Undo Anyway' : 'Undo Last Insert'}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </>
+    );
+  }
+
   function renderChooseNoteAction(): React.JSX.Element | null {
     if (currentIsNote) {
       return null;
@@ -1692,6 +2144,11 @@ export function PluginScreen(): React.JSX.Element {
           <Pressable style={styles.rowButtonSecondary} onPress={browseFiles}>
             <Text style={styles.rowButtonSecondaryText}>Browse</Text>
           </Pressable>
+          {currentTarget?.kind === 'pdf' ? (
+            <Pressable style={styles.rowButtonSecondary} onPress={openPdfInsert}>
+              <Text style={styles.rowButtonSecondaryText}>Insert Page…</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             style={styles.rowButtonSecondary}
             onPress={() => PluginManager.closePluginView()}>
@@ -1986,7 +2443,7 @@ export function PluginScreen(): React.JSX.Element {
         <View style={styles.placingScreen}>
           <Text style={styles.placingTitle}>{placing}</Text>
           <Text style={styles.placingHint}>
-            {'Shelf closes by itself when everything is on the page.'}
+            {'Shelf closes by itself when it is done.'}
           </Text>
         </View>
       </SafeAreaView>
@@ -2002,7 +2459,9 @@ export function PluginScreen(): React.JSX.Element {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Shelf</Text>
 
-        {detailItem ? (
+        {pdfInsert ? (
+          renderPdfInsert(pdfInsert)
+        ) : detailItem ? (
           renderDetail(detailItem)
         ) : (
           <>
@@ -2519,6 +2978,26 @@ const styles = StyleSheet.create({
     color: '#202020',
     fontSize: 15,
     fontWeight: '700',
+  },
+  pdfInsertCount: {
+    color: '#202020',
+    fontSize: 22,
+    fontWeight: '700',
+    minWidth: 36,
+    textAlign: 'center',
+  },
+  pdfInsertWarning: {
+    borderColor: '#202020',
+    borderRadius: 6,
+    borderWidth: 2,
+    marginBottom: 10,
+    padding: 10,
+  },
+  pdfInsertUndo: {
+    borderTopColor: '#b0b0b0',
+    borderTopWidth: 1,
+    marginTop: 12,
+    paddingTop: 10,
   },
   placingScreen: {
     alignItems: 'center',

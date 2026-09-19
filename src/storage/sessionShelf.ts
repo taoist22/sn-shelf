@@ -1,5 +1,5 @@
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
-import {projectNoteTarget} from '../domain/shelfItem';
+import {normalizeDevicePath, projectNoteTarget} from '../domain/shelfItem';
 import {
   createProject,
   deleteProject,
@@ -189,5 +189,51 @@ export function moveToProject(
 ): ShelfTarget | null {
   const moved = moveGeneralItemToProject(state, itemId, anchorPath);
   persist();
+  return moved;
+}
+
+/**
+ * After pages were inserted into (or removed from) a document, moves Shelf's
+ * own references to it — pins and captured quotes — to their new page
+ * numbers. Links already placed inside notes cannot be reached from here.
+ * Returns how many references moved.
+ */
+export function shiftDocumentPages(
+  documentPath: string,
+  mapPage: (page: number) => number,
+): number {
+  const target = normalizeDevicePath(documentPath);
+  let moved = 0;
+  const shiftTarget = (item: ShelfTarget): ShelfTarget => {
+    if (normalizeDevicePath(item.path) !== target) {
+      return item;
+    }
+    const page = mapPage(item.page);
+    if (page === item.page) {
+      return item;
+    }
+    moved += 1;
+    return {...item, page};
+  };
+  const shiftQuote = (quote: ShelfQuote): ShelfQuote => {
+    if (!quote.sourcePath || normalizeDevicePath(quote.sourcePath) !== target) {
+      return quote;
+    }
+    const sourcePage = mapPage(quote.sourcePage);
+    if (sourcePage === quote.sourcePage) {
+      return quote;
+    }
+    moved += 1;
+    return {...quote, sourcePage};
+  };
+  state.general = state.general.map(shiftTarget);
+  for (const project of state.projects) {
+    project.references = project.references.map(shiftTarget);
+    project.quotes = project.quotes.map(shiftQuote);
+  }
+  state.inboxQuotes = state.inboxQuotes.map(shiftQuote);
+  if (moved > 0) {
+    persist();
+  }
   return moved;
 }

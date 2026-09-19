@@ -219,6 +219,8 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    // PDF page insertion (Apache 2.0). See docs/pdf-page-insertion-design.md.
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
