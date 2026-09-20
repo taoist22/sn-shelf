@@ -27,7 +27,9 @@ import {
   type ShelfQuote,
   type ShelfTarget,
 } from '../domain/shelfItem';
+import {PDF_LIMIT_HINT, PDF_LIMIT_MB, pdfLargeNote, pdfSizeLevel} from '../domain/pdfSize';
 import type {ShelfContext} from '../domain/shelfState';
+import {checkPdfSize} from '../supernote/pdfSizeGate';
 import {
   openShelfFolder,
   openShelfTarget,
@@ -284,7 +286,8 @@ export function PluginScreen(): React.JSX.Element {
     status.startsWith('No room') ||
     status.startsWith('Not enough room') ||
     status.includes('Turn the page') ||
-    status.includes('handwriting could not');
+    status.includes('handwriting could not') ||
+    status.includes("can't load PDFs over");
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
@@ -330,6 +333,11 @@ export function PluginScreen(): React.JSX.Element {
       const allProjects = listProjects();
       if (ctx.kind !== 'project' && allProjects.length === 0) {
         setStatus('Create a project first — quotes are saved to projects.');
+        return;
+      }
+      const size = await checkPdfSize(current);
+      if (size.level === 'tooLarge') {
+        setStatus(size.message);
         return;
       }
       let text = '';
@@ -513,6 +521,12 @@ export function PluginScreen(): React.JSX.Element {
         return;
       }
       await shelfLog(`--- Insert Page opened on ${current.path} page ${current.page + 1}`);
+      const size = await checkPdfSize(current);
+      if (size.level === 'tooLarge') {
+        await shelfLog(`refused: ${size.bytes} bytes is over the limit`);
+        setStatus(size.message);
+        return;
+      }
       const undo = await getPdfUndo(current.path);
       const spaces = await getPdfWorkSpaces(current.path);
       await shelfLog(`workspaces: ${JSON.stringify(spaces)}; saved choice ${getPdfWorkSpace()}`);
@@ -1090,6 +1104,11 @@ export function PluginScreen(): React.JSX.Element {
   const pinCurrent = useCallback(async () => {
     try {
       const target = await getCurrentTarget();
+      const size = await checkPdfSize(target);
+      if (size.level === 'tooLarge') {
+        setStatus(size.message);
+        return;
+      }
       if (context.kind === 'project') {
         const next = [
           target,
@@ -1123,6 +1142,12 @@ export function PluginScreen(): React.JSX.Element {
     async (anchorPath: string, anchorTitle: string) => {
       try {
         const target = await getCurrentTarget();
+        const size = await checkPdfSize(target);
+        if (size.level === 'tooLarge') {
+          setStatus(size.message);
+          setShowPinChooser(false);
+          return;
+        }
         const project = listProjects().find(
           entry => entry.anchorPath === anchorPath,
         );
@@ -1150,18 +1175,34 @@ export function PluginScreen(): React.JSX.Element {
 
   const browseFiles = useCallback(async () => {
     try {
-      const targets = await chooseShelfFiles();
-      if (targets.length === 0) {
+      const picked = await chooseShelfFiles();
+      if (picked.length === 0) {
         setStatus('');
         return;
       }
+      // Oversize PDFs are dropped from the selection rather than refusing the
+      // whole pick: the other files the user chose are still fine.
+      const checked = await Promise.all(
+        picked.map(async target => ({target, size: await checkPdfSize(target)})),
+      );
+      const refused = checked.filter(entry => entry.size.level === 'tooLarge');
+      const targets = checked
+        .filter(entry => entry.size.level !== 'tooLarge')
+        .map(entry => entry.target);
+      if (targets.length === 0) {
+        setStatus(refused[0].size.message);
+        return;
+      }
+      const skipped = refused.length
+        ? ` Left out ${refused.map(entry => entry.target.title).join(', ')} — over ${PDF_LIMIT_MB} MB.`
+        : '';
       if (context.kind === 'project') {
         const kept = context.project.references.filter(
           item => !targets.some(target => target.path === item.path),
         );
         saveProjectReferences(context.project.anchorPath, [...targets, ...kept]);
         setStatus(
-          `Added ${targets.length} ${targets.length === 1 ? 'file' : 'files'} to ${context.project.anchorTitle}.`,
+          `Added ${targets.length} ${targets.length === 1 ? 'file' : 'files'} to ${context.project.anchorTitle}.${skipped}`,
         );
       } else {
         const kept = generalItems.filter(
@@ -1169,7 +1210,7 @@ export function PluginScreen(): React.JSX.Element {
         );
         saveGeneralItems([...targets, ...kept]);
         setStatus(
-          `Added ${targets.length} ${targets.length === 1 ? 'file' : 'files'} to the general shelf.`,
+          `Added ${targets.length} ${targets.length === 1 ? 'file' : 'files'} to the general shelf.${skipped}`,
         );
       }
       await refresh();
@@ -1927,6 +1968,12 @@ export function PluginScreen(): React.JSX.Element {
           {'While it works, Shelf steps out to a note for a few seconds and may disappear — it comes back to this PDF on the new page.'}
         </Text>
 
+        {request.spaces && pdfSizeLevel(request.spaces.pdfSizeBytes) === 'large' ? (
+          <Text style={styles.statusStrong}>
+            {pdfLargeNote(request.spaces.pdfSizeBytes)}
+          </Text>
+        ) : null}
+
         {request.warning ? (
           <View style={styles.pdfInsertWarning}>
             <Text style={styles.statusStrong}>{request.warning}</Text>
@@ -2217,6 +2264,7 @@ export function PluginScreen(): React.JSX.Element {
             <Text style={styles.rowButtonSecondaryText}>Close</Text>
           </Pressable>
         </View>
+        <Text style={styles.limitHint}>{PDF_LIMIT_HINT}</Text>
         {canPinToProject && showPinChooser ? (
           <View style={styles.moveChooser}>
             <Text style={styles.moveChooserTitle}>Add this file to:</Text>
@@ -3126,6 +3174,14 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
     marginBottom: 6,
+  },
+  limitHint: {
+    color: '#000000',
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 24,
+    marginBottom: 8,
+    marginTop: 2,
   },
   captureInkHint: {
     color: '#505050',

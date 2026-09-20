@@ -62,7 +62,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     private static final COSName INSERTED_MARKER = COSName.getPDFName("ShelfInserted");
     private static final int MAX_PAGES = 20;
     /** Bumped with each native change; shown on screen and in the log to spot stale installs. */
-    static final int NATIVE_BUILD = 16;
+    static final int NATIVE_BUILD = 17;
     private static final File LOG_FILE = new File("/storage/emulated/0/EXPORT/shelf-log.txt");
     private static final long LOG_MAX_BYTES = 512L * 1024;
     private static final float MM = 72f / 25.4f;
@@ -72,6 +72,18 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     private static final int BACKUP_MAX_COUNT = 5;
     /** Undo backups are full copies; cap what they may use on each storage. */
     private static final long BACKUP_MAX_BYTES = 500L * 1024 * 1024;
+    /**
+     * The largest PDF Shelf will rewrite. Measured on a Manta: 738 KB takes 2.4s, 38.5 MB
+     * takes 34s, and the device's own reader is already slow with a document that big.
+     * The JS side refuses these before they reach a shelf; this is the backstop.
+     */
+    private static final long MAX_PDF_BYTES = 25L * 1024 * 1024;
+    /**
+     * Up to this size the written PDF is re-parsed in full to prove it is readable. Past it
+     * that second parse costs about as much as the whole edit, so the file is checked
+     * structurally instead (see verifyWritten).
+     */
+    private static final long VERIFY_FULL_PARSE_MAX = 10L * 1024 * 1024;
     /** Working copies + new PDF + backup: about three times the PDF must be free. */
     private static final int SPACE_FACTOR = 3;
     private static final long SPACE_MARGIN = 20L * 1024 * 1024;
@@ -101,6 +113,17 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
             }
         } catch (Throwable t) {
             Log.w(TAG, "appendLog", t);
+        }
+    }
+
+    /** Bytes of a file, or 0 when it can't be read — the size gate treats 0 as "unknown". */
+    @ReactMethod
+    public void fileSize(String path, Promise promise) {
+        try {
+            File file = new File(path == null ? "" : path);
+            promise.resolve(file.isFile() ? (double) file.length() : 0.0);
+        } catch (Throwable t) {
+            promise.resolve(0.0);
         }
     }
 
@@ -271,6 +294,11 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         long sourceModified = source.lastModified();
         appendLog("native: working in " + workDir + " (free " + workDir.getUsableSpace() / (1024 * 1024)
                 + "MB), pdf " + sourceSize / 1024 + "KB");
+        if (sourceSize > MAX_PDF_BYTES) {
+            throw new PdfEditError("PDF_TOO_LARGE", "This PDF is " + sourceSize / (1024 * 1024)
+                    + " MB. Shelf doesn't add pages to PDFs over " + MAX_PDF_BYTES / (1024 * 1024)
+                    + " MB. Compress or split it first.");
+        }
         ensureSpace(workDir, sourceSize);
         File built = new File(workDir, "insert-" + System.currentTimeMillis() + ".pdf");
 
@@ -306,13 +334,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         }
         appendLog("native: saved new PDF " + built.length() / 1024 + "KB");
 
-        // Verify with a fresh parser before anything touches the original.
-        try (PDDocument check = load(built, workDir)) {
-            int finalCount = check.getPages().getCount();
-            if (finalCount != originalCount + count) {
-                throw new PdfEditError("PDF_VERIFY_FAILED", "The edited PDF did not check out, so nothing was changed.");
-            }
-        }
+        verifyWritten(built, workDir, originalCount + count);
         if (source.length() != sourceSize || source.lastModified() != sourceModified) {
             deleteQuietly(built);
             throw new PdfEditError("PDF_CHANGED", "The PDF changed while the pages were being added. Try again.");
@@ -339,6 +361,40 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         dropOtherBackups(workDir, path);
         pruneBackups(workDir);
         return result;
+    }
+
+    /**
+     * Checks the written PDF before anything touches the user's original.
+     *
+     * A small file is re-parsed in full and its pages counted. A large one is not: parsing a
+     * 900-page book twice doubles the edit for a check the write itself already largely
+     * proves, so the file is checked for a plausible size and a complete trailer instead.
+     */
+    private void verifyWritten(File built, File workDir, int expectedPages) throws IOException, PdfEditError {
+        if (built.length() <= VERIFY_FULL_PARSE_MAX) {
+            try (PDDocument check = load(built, workDir)) {
+                if (check.getPages().getCount() != expectedPages) {
+                    throw new PdfEditError("PDF_VERIFY_FAILED", "The edited PDF did not check out, so nothing was changed.");
+                }
+            }
+            return;
+        }
+        if (built.length() < 1024 || !endsWithEof(built)) {
+            throw new PdfEditError("PDF_VERIFY_FAILED", "The edited PDF was not written completely, so nothing was changed.");
+        }
+        appendLog("native: checked written PDF without a second parse (" + built.length() / 1024 + "KB)");
+    }
+
+    /** A complete PDF ends with %%EOF; a half-written one does not. */
+    private static boolean endsWithEof(File file) throws IOException {
+        int window = 2048;
+        try (java.io.RandomAccessFile handle = new java.io.RandomAccessFile(file, "r")) {
+            long start = Math.max(0, handle.length() - window);
+            handle.seek(start);
+            byte[] tail = new byte[(int) (handle.length() - start)];
+            handle.readFully(tail);
+            return new String(tail, StandardCharsets.US_ASCII).contains("%%EOF");
+        }
     }
 
     /**

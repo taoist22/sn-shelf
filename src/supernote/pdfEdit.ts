@@ -49,6 +49,7 @@ type ShelfPdfEditBridge = {
     space: PdfWorkSpace,
   ): Promise<PdfInsertResult>;
   getWorkSpaces(path: string): Promise<PdfWorkSpaces>;
+  fileSize(path: string): Promise<number>;
   delay(ms: number): Promise<null>;
   getUndo(path: string): Promise<PdfUndoRecord | null>;
   undoLastInsert(path: string): Promise<PdfUndoRecord>;
@@ -74,6 +75,19 @@ export function insertPdfPages(
   space: PdfWorkSpace,
 ): Promise<PdfInsertResult> {
   return requireBridge().insertPages(path, anchorIndex, position, count, background, space);
+}
+
+/** Bytes on disk, or 0 when the size can't be read (an older native package, a gone file). */
+export async function getFileSize(path: string): Promise<number> {
+  if (!ShelfPdfEdit?.fileSize) {
+    return 0;
+  }
+  try {
+    const bytes = await ShelfPdfEdit.fileSize(path);
+    return typeof bytes === 'number' && Number.isFinite(bytes) ? bytes : 0;
+  } catch {
+    return 0;
+  }
 }
 
 export async function getPdfWorkSpaces(path: string): Promise<PdfWorkSpaces | null> {

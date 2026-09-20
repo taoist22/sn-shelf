@@ -137,6 +137,9 @@ While reading a PDF, open Shelf and tap **Insert Page…** (PDFs only).
 5. If anything fails part-way, Shelf puts the PDF and the handwriting back
    as they were and says so.
 
+Inserting a page rewrites the whole PDF, so the file can grow by a few
+percent the first time (PDFBox does not preserve the original's compression).
+
 Shelf keeps one backup per PDF (the five most recent, up to 30 days) in its
 private storage for undo. Your pins and captured quotes on that PDF are
 moved to the new page numbers. Source links **already placed in notes** keep
@@ -168,6 +171,30 @@ no cloud account, no companion app:
    onto the current page of **any** note — no source link, since the source
    isn't on the device. A `-YYYY-MM-DD-HHMMSS` filename suffix becomes the
    shown capture date.
+
+### PDF size limit
+
+**Shelf does not take PDFs over 25 MB**, and warns you about ones over 10 MB.
+A PDF that size can't be pinned, quoted or added to a project, and pages
+can't be inserted into it.
+
+This is a deliberate line, not a missing feature. Measured on a Manta: a
+738 KB PDF gains a page in about 2.5 seconds, while a 38.5 MB, 930-page book
+took 34 — and the device's own reader was slow to open that book and slow to
+turn its pages before Shelf was involved at all. Between 10 and 25 MB the
+Insert Page screen tells you roughly how long the insert will take.
+
+To use a large PDF with Shelf, shrink it on a computer first. Ghostscript
+does this well, and re-encoding the page images to grayscale at 150 dpi
+matches what the screen can actually show:
+
+```
+gs -sDEVICE=pdfwrite -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH \
+   -sOutputFile=small.pdf big.pdf
+```
+
+Scanned books usually shrink by well over half. A text-based PDF will barely
+change, because its text was never what made it big.
 
 ### Notes on behavior
 
