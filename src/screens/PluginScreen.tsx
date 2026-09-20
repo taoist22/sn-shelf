@@ -56,6 +56,8 @@ import {
   resolveShelfContext,
   saveGeneralItems,
   saveProjectReferences,
+  getPdfWorkSpace,
+  setPdfWorkSpace,
   setProjectWorkingNote,
   shiftDocumentPages,
 } from '../storage/sessionShelf';
@@ -63,6 +65,7 @@ import {importInboxQuotes} from '../services/quoteInbox';
 import {invalidateObstacleScans} from '../supernote/supernoteShelf';
 import {pluginLifecycleAction} from '../supernote/pluginLifecycle';
 import {
+  ensureFileDeletePermission,
   ensureFileReadPermission,
   ensureFileWritePermission,
 } from '../supernote/pluginPermissions';
@@ -80,7 +83,9 @@ import {
 } from '../domain/pdfInsertion';
 import {
   clearPageMarks,
+  formatFree,
   getPdfUndo,
+  getPdfWorkSpaces,
   insertPdfPages,
   movePageMarks,
   pageMarkCount,
@@ -90,7 +95,10 @@ import {
   undoPdfInsert,
   type PdfInsertResult,
   type PdfUndoRecord,
+  type PdfWorkSpaces,
 } from '../supernote/pdfEdit';
+import type {PdfWorkSpace} from '../storage/nativeShelfStorage';
+import {SHELF_LOG_FILE, shelfLog} from '../supernote/shelfLog';
 import {
   ensureThumbnail,
   pruneThumbnails,
@@ -133,6 +141,9 @@ type PdfInsertState = {
   position: InsertPosition;
   count: number;
   background: InsertBackground;
+  /** Where the heavy work happens; offered only when an SD card is usable. */
+  space: PdfWorkSpace;
+  spaces: PdfWorkSpaces | null;
   undo: PdfUndoRecord | null;
   /** Shown before inserting when the handwriting could not be read. */
   warning: string | null;
@@ -501,7 +512,10 @@ export function PluginScreen(): React.JSX.Element {
         setStatus('Insert Page works on PDFs only.');
         return;
       }
+      await shelfLog(`--- Insert Page opened on ${current.path} page ${current.page + 1}`);
       const undo = await getPdfUndo(current.path);
+      const spaces = await getPdfWorkSpaces(current.path);
+      await shelfLog(`workspaces: ${JSON.stringify(spaces)}; saved choice ${getPdfWorkSpace()}`);
       setPdfInsert({
         path: current.path,
         title: current.title,
@@ -509,6 +523,8 @@ export function PluginScreen(): React.JSX.Element {
         position: 'after',
         count: 1,
         background: 'lined',
+        space: getPdfWorkSpace(),
+        spaces,
         undo: undo && undo.path === current.path ? undo : null,
         warning: null,
         undoWarning: null,
@@ -517,6 +533,11 @@ export function PluginScreen(): React.JSX.Element {
     } catch (error) {
       setStatus(`Could not read the open PDF: ${String(error)}`);
     }
+  }, []);
+
+  const chooseWorkSpace = useCallback((space: PdfWorkSpace) => {
+    setPdfWorkSpace(space);
+    setPdfInsert(previous => (previous ? {...previous, space, error: ''} : previous));
   }, []);
 
   // Changing any choice drops an earlier warning: it described a different insert.
@@ -560,12 +581,22 @@ export function PluginScreen(): React.JSX.Element {
       if (!request) {
         return;
       }
+      await shelfLog(
+        `Insert tapped: ${request.count} ${request.background} ${request.position} page ${
+          request.anchor + 1
+        }, space ${request.space}, confirmed ${confirmed}`,
+      );
       if (!(await ensureFileReadPermission()) || !(await ensureFileWritePermission())) {
+        await shelfLog('stopped: file permission not granted');
         setPdfInsert({...request, error: 'File access was not allowed, so the PDF was not changed.'});
         return;
       }
+      // Best effort only: without it Shelf cannot tidy up its working files on
+      // external storage, but inserts still work (device log, 2026-09-19).
+      await shelfLog(`delete permission: ${await ensureFileDeletePermission()}`);
       // Read while the PDF is still open: getMarkPages is refused once it is closed.
       const marked = await readMarkedPages(request.path);
+      await shelfLog(`marked pages: ${JSON.stringify(marked)}`);
       if (marked === null && !confirmed) {
         setPdfInsert({
           ...request,
@@ -576,6 +607,7 @@ export function PluginScreen(): React.JSX.Element {
         return;
       }
       const stepOut = noteToStepOutTo();
+      await shelfLog(`step out to: ${stepOut ? stepOut.path : 'NONE'}`);
       if (!stepOut) {
         setPdfInsert({...request, warning: null, error: NO_NOTE_MESSAGE});
         return;
@@ -583,6 +615,7 @@ export function PluginScreen(): React.JSX.Element {
 
       pdfOperationRef.current = true;
       const fail = async (message: string, reopenPdf: boolean) => {
+        await shelfLog(`FAILED: ${message}`);
         if (reopenPdf) {
           await openFileAndWait(request.path, request.anchor);
         }
@@ -607,6 +640,7 @@ export function PluginScreen(): React.JSX.Element {
           request.position,
           request.count,
           request.background,
+          request.space,
         );
       } catch (error) {
         await fail(pdfEditErrorMessage(error), true);
@@ -646,6 +680,7 @@ export function PluginScreen(): React.JSX.Element {
         return;
       }
 
+      await shelfLog(`handwriting moved on ${done.length} page(s)`);
       shiftDocumentPages(request.path, page =>
         pageAfterInsert(page, result.firstInsertedIndex, result.count),
       );
@@ -1115,15 +1150,7 @@ export function PluginScreen(): React.JSX.Element {
 
   const browseFiles = useCallback(async () => {
     try {
-      let startFolder: string | undefined;
-      if (context.kind === 'project') {
-        const anchor = normalizeDevicePath(context.project.anchorPath);
-        startFolder =
-          context.project.anchorKind === 'folder'
-            ? anchor
-            : anchor.slice(0, anchor.lastIndexOf('/')) || undefined;
-      }
-      const targets = await chooseShelfFiles(startFolder);
+      const targets = await chooseShelfFiles();
       if (targets.length === 0) {
         setStatus('');
         return;
@@ -1132,10 +1159,7 @@ export function PluginScreen(): React.JSX.Element {
         const kept = context.project.references.filter(
           item => !targets.some(target => target.path === item.path),
         );
-        saveProjectReferences(context.project.anchorPath, [
-          ...targets,
-          ...kept,
-        ]);
+        saveProjectReferences(context.project.anchorPath, [...targets, ...kept]);
         setStatus(
           `Added ${targets.length} ${targets.length === 1 ? 'file' : 'files'} to ${context.project.anchorTitle}.`,
         );
@@ -1865,6 +1889,44 @@ export function PluginScreen(): React.JSX.Element {
           )}
         </View>
 
+        {request.spaces?.sdWritable ? (
+          <>
+            <Text style={styles.captureHeading}>{'WORKING SPACE'}</Text>
+            <View style={styles.actionsRow}>
+              {renderChoice(
+                `Same as PDF (${request.spaces.pdfOnSd ? 'SD card' : 'internal'})`,
+                request.space === 'same',
+                () => chooseWorkSpace('same'),
+              )}
+              {renderChoice(
+                `SD card (${formatFree(request.spaces.sdFreeBytes)})`,
+                request.space === 'sd',
+                () => chooseWorkSpace('sd'),
+              )}
+              {renderChoice(
+                `Internal (${formatFree(request.spaces.internalFreeBytes)})`,
+                request.space === 'internal',
+                () => chooseWorkSpace('internal'),
+              )}
+            </View>
+            <Text style={styles.captureInkHint}>
+              {'Where Shelf does the heavy work and keeps the undo backup. Needs about 3× the PDF size free.'}
+            </Text>
+          </>
+        ) : (
+          <Text style={styles.captureInkHint}>
+            {request.spaces
+              ? `Working space: internal storage. SD card: ${
+                  request.spaces.sdReason || 'no reason reported'
+                }. (native build ${request.spaces.nativeBuild ?? 'OLD — reinstall'}; log: ${SHELF_LOG_FILE})`
+              : `Working space: internal storage. Shelf couldn't check the SD card. (log: ${SHELF_LOG_FILE})`}
+          </Text>
+        )}
+
+        <Text style={styles.captureInkHint}>
+          {'While it works, Shelf steps out to a note for a few seconds and may disappear — it comes back to this PDF on the new page.'}
+        </Text>
+
         {request.warning ? (
           <View style={styles.pdfInsertWarning}>
             <Text style={styles.statusStrong}>{request.warning}</Text>
@@ -2536,6 +2598,7 @@ export function PluginScreen(): React.JSX.Element {
         onCancel={() => setNotePickerOpen(false)}
         onSelect={openChosenNote}
       />
+
     </SafeAreaView>
   );
 }

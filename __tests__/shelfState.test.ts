@@ -182,3 +182,12 @@ describe('quote ink persistence', () => {
     expect(state.inboxQuotes[0].ink).toBeUndefined();
   });
 });
+
+describe('Insert Page working space setting', () => {
+  it('keeps a valid choice and drops anything else', () => {
+    const base = {version: 2, general: [], projects: []};
+    expect(parsePersistedShelfState(JSON.stringify({...base, pdfWorkSpace: 'sd'})).pdfWorkSpace).toBe('sd');
+    expect(parsePersistedShelfState(JSON.stringify({...base, pdfWorkSpace: 'cloud'})).pdfWorkSpace).toBeUndefined();
+    expect(parsePersistedShelfState(JSON.stringify(base)).pdfWorkSpace).toBeUndefined();
+  });
+});

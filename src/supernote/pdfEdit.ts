@@ -1,6 +1,22 @@
 import {NativeModules} from 'react-native';
 import {PluginCommAPI, PluginFileAPI} from 'sn-plugin-lib';
 import type {InsertBackground, InsertPosition} from '../domain/pdfInsertion';
+import type {PdfWorkSpace} from '../storage/nativeShelfStorage';
+import {shelfLog} from './shelfLog';
+
+/** What the Insert Page screen needs to offer the working-space choice. */
+export type PdfWorkSpaces = {
+  sdPresent: boolean;
+  sdWritable: boolean;
+  sdFreeBytes: number;
+  internalFreeBytes: number;
+  pdfOnSd: boolean;
+  pdfSizeBytes: number;
+  /** Why the SD card is or isn't usable, shown when the choice is not offered. */
+  sdReason?: string;
+  /** ShelfPdfEditModule.NATIVE_BUILD; absent = an older native package is running. */
+  nativeBuild?: number;
+};
 
 // Bridge to ShelfPdfEditModule (PDFBox-Android): in-place page insertion into
 // the open PDF, with a per-PDF backup for undo. See docs/pdf-page-insertion-design.md.
@@ -30,7 +46,10 @@ type ShelfPdfEditBridge = {
     position: InsertPosition,
     count: number,
     background: InsertBackground,
+    space: PdfWorkSpace,
   ): Promise<PdfInsertResult>;
+  getWorkSpaces(path: string): Promise<PdfWorkSpaces>;
+  delay(ms: number): Promise<null>;
   getUndo(path: string): Promise<PdfUndoRecord | null>;
   undoLastInsert(path: string): Promise<PdfUndoRecord>;
 };
@@ -52,8 +71,26 @@ export function insertPdfPages(
   position: InsertPosition,
   count: number,
   background: InsertBackground,
+  space: PdfWorkSpace,
 ): Promise<PdfInsertResult> {
-  return requireBridge().insertPages(path, anchorIndex, position, count, background);
+  return requireBridge().insertPages(path, anchorIndex, position, count, background, space);
+}
+
+export async function getPdfWorkSpaces(path: string): Promise<PdfWorkSpaces | null> {
+  if (!ShelfPdfEdit) {
+    return null;
+  }
+  try {
+    return await ShelfPdfEdit.getWorkSpaces(path);
+  } catch {
+    return null;
+  }
+}
+
+/** "41 GB free" / "820 MB free". */
+export function formatFree(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${Math.round(mb / 1024)} GB free` : `${Math.round(mb)} MB free`;
 }
 
 export async function getPdfUndo(path: string): Promise<PdfUndoRecord | null> {
@@ -192,22 +229,44 @@ export async function movePageMarks(path: string, from: number, to: number): Pro
  * its handwriting, and back into it afterwards. Returns false on timeout.
  */
 export async function openFileAndWait(path: string, page: number, timeoutMs = 10000): Promise<boolean> {
+  await shelfLog(`open ${path} page ${page}`);
   try {
-    await PluginFileAPI.openFile(path, page);
-  } catch {
+    const opened = await PluginFileAPI.openFile(path, page);
+    await shelfLog(`openFile returned ${JSON.stringify(opened)}`);
+  } catch (error) {
+    await shelfLog(`openFile threw ${String(error)}`);
     return false;
   }
   const deadline = Date.now() + timeoutMs;
+  let checks = 0;
+  let last = '';
   while (Date.now() < deadline) {
+    checks += 1;
     try {
       const res = (await PluginCommAPI.getCurrentFilePath()) as MarkApiResponse<string>;
+      last = String(res?.result);
       if (res?.success && res.result === path) {
+        await shelfLog(`reader switched after ${checks} check(s)`);
         return true;
       }
-    } catch {
-      // the reader is switching files; keep waiting
+    } catch (error) {
+      last = `threw ${String(error)}`;
     }
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await nativeDelay(300);
   }
+  await shelfLog(`reader did NOT switch after ${checks} check(s); last open file: ${last}`);
   return false;
+}
+
+/**
+ * A pause that still ends while the plugin panel is hidden. JS timers do not
+ * fire then, and stepping out of a PDF can hide the panel — Insert Page froze
+ * on exactly this wait (device report 2026-09-19).
+ */
+async function nativeDelay(ms: number): Promise<void> {
+  if (ShelfPdfEdit?.delay) {
+    await ShelfPdfEdit.delay(ms);
+    return;
+  }
+  await new Promise(resolve => setTimeout(resolve, ms));
 }

@@ -19,7 +19,15 @@ export type PersistedShelfState = {
   headingTexts: Record<string, HeadingText[]>;
   /** Quotes imported from INBOX files; not tied to any project. */
   inboxQuotes: ShelfQuote[];
+  /** Where Insert Page does its heavy work; absent = 'same' (the PDF's storage). */
+  pdfWorkSpace?: PdfWorkSpace;
 };
+
+export type PdfWorkSpace = 'same' | 'sd' | 'internal';
+
+function parsePdfWorkSpace(value: unknown): PdfWorkSpace | undefined {
+  return value === 'same' || value === 'sd' || value === 'internal' ? value : undefined;
+}
 
 type ShelfStorageModule = {
   readState(): Promise<string | null>;
@@ -164,6 +172,7 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
     activeAnchorPath?: unknown;
     headingTexts?: unknown;
     inboxQuotes?: unknown;
+    pdfWorkSpace?: unknown;
     items?: unknown;
     returnTarget?: unknown;
   };
@@ -188,6 +197,7 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
       activeAnchorPath,
       headingTexts: parseHeadingTexts(value.headingTexts),
       inboxQuotes: parseQuotes(value.inboxQuotes),
+      pdfWorkSpace: parsePdfWorkSpace(value.pdfWorkSpace),
     };
   }
 

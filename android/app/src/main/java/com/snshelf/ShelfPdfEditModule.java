@@ -1,5 +1,6 @@
 package com.snshelf;
 
+import android.os.Environment;
 import android.util.Log;
 
 import com.facebook.react.bridge.Arguments;
@@ -34,6 +35,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Inserts blank or ruled pages into a PDF, in place, with undo.
@@ -58,14 +61,56 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     private static final String TAG = "ShelfPdfEdit";
     private static final COSName INSERTED_MARKER = COSName.getPDFName("ShelfInserted");
     private static final int MAX_PAGES = 20;
+    /** Bumped with each native change; shown on screen and in the log to spot stale installs. */
+    static final int NATIVE_BUILD = 16;
+    private static final File LOG_FILE = new File("/storage/emulated/0/EXPORT/shelf-log.txt");
+    private static final long LOG_MAX_BYTES = 512L * 1024;
     private static final float MM = 72f / 25.4f;
     private static final float RULE_SPACING = 8f * MM;   // Supernote's standard 8 mm ruling
     private static final float RULE_MARGIN = 10f * MM;
     private static final long BACKUP_MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000;
     private static final int BACKUP_MAX_COUNT = 5;
+    /** Undo backups are full copies; cap what they may use on each storage. */
+    private static final long BACKUP_MAX_BYTES = 500L * 1024 * 1024;
+    /** Working copies + new PDF + backup: about three times the PDF must be free. */
+    private static final int SPACE_FACTOR = 3;
+    private static final long SPACE_MARGIN = 20L * 1024 * 1024;
 
     private final ReactApplicationContext reactContext;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    /** For delay() and log(): separate from the worker, which may be busy with a long PDF edit. */
+    private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+
+    /**
+     * Appends a timestamped line to EXPORT/shelf-log.txt, which the user downloads with
+     * Browse & Access — so a failed Insert Page is diagnosed from facts, not guesses. The file
+     * restarts when it passes 512 KB. Never throws.
+     */
+    static synchronized void appendLog(String line) {
+        try {
+            File dir = LOG_FILE.getParentFile();
+            if (dir != null && !dir.isDirectory()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            boolean append = LOG_FILE.length() < LOG_MAX_BYTES;
+            String stamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                    .format(new java.util.Date());
+            try (OutputStream out = new FileOutputStream(LOG_FILE, append)) {
+                out.write((stamp + "  " + line + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "appendLog", t);
+        }
+    }
+
+    @ReactMethod
+    public void log(String line, Promise promise) {
+        timer.execute(() -> {
+            appendLog(line);
+            promise.resolve(null);
+        });
+    }
     private volatile boolean pdfBoxReady = false;
 
     public ShelfPdfEditModule(ReactApplicationContext reactContext) {
@@ -81,6 +126,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     @Override
     public void invalidate() {
         worker.shutdown();
+        timer.shutdown();
         super.invalidate();
     }
 
@@ -92,16 +138,65 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
      */
     @ReactMethod
     public void insertPages(String path, int anchorIndex, String position, int count,
-                            String background, Promise promise) {
+                            String background, String space, Promise promise) {
         worker.execute(() -> {
             try {
-                promise.resolve(doInsert(path, anchorIndex, position, count, background));
+                appendLog("native " + NATIVE_BUILD + ": insert " + count + " " + background + " " + position
+                        + " page " + (anchorIndex + 1) + " space=" + space + " file=" + path);
+                WritableMap result = doInsert(path, anchorIndex, position, count, background, space);
+                appendLog("native: insert done, pages " + result.getInt("originalCount") + " -> "
+                        + result.getInt("finalCount"));
+                promise.resolve(result);
             } catch (PdfEditError e) {
+                appendLog("native: insert refused " + e.code + " " + e.getMessage());
                 promise.reject(e.code, e.getMessage());
             } catch (Throwable t) {
+                appendLog("native: insert FAILED " + t);
                 Log.e(TAG, "insertPages failed", t);
                 promise.reject("PDF_EDIT_FAILED", String.valueOf(t.getMessage()), t);
             }
+        });
+    }
+
+    /**
+     * Resolves after `ms`. JS timers (setTimeout) do not fire while the plugin panel is
+     * hidden, and opening another file to step out of a PDF can hide it — Insert Page then
+     * froze waiting (device report 2026-09-19). A native resolve still reaches JS.
+     */
+    @ReactMethod
+    public void delay(int ms, Promise promise) {
+        timer.schedule(() -> promise.resolve(null), Math.max(0, ms), TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * What the Insert Page screen needs to offer a working-space choice:
+     * {sdPresent, sdWritable, sdFreeBytes, internalFreeBytes, pdfOnSd, pdfSizeBytes}.
+     */
+    @ReactMethod
+    public void getWorkSpaces(String path, Promise promise) {
+        worker.execute(() -> {
+            WritableMap map = Arguments.createMap();
+            try {
+                File internal = internalDir();
+                SdSpace sd = findSd();
+                map.putBoolean("sdPresent", sd.root != null);
+                map.putBoolean("sdWritable", sd.dir != null);
+                map.putString("sdReason", sd.reason);
+                map.putDouble("sdFreeBytes", sd.dir != null ? sd.dir.getUsableSpace() : 0);
+                map.putDouble("internalFreeBytes", internal.getUsableSpace());
+                map.putBoolean("pdfOnSd", sd.root != null && path.startsWith(sd.root + "/"));
+                map.putDouble("pdfSizeBytes", new File(path).length());
+                appendLog("native: workspaces sd=" + sd.reason + " internalFree="
+                        + internal.getUsableSpace() / (1024 * 1024) + "MB");
+            } catch (Throwable t) {
+                Log.w(TAG, "getWorkSpaces", t);
+                map.putBoolean("sdPresent", false);
+                map.putBoolean("sdWritable", false);
+                map.putString("sdReason", "check failed: " + t);
+                appendLog("native: workspaces check FAILED " + t);
+            }
+            map.putInt("nativeBuild", NATIVE_BUILD);
+            promise.resolve(map);
         });
     }
 
@@ -110,13 +205,12 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     public void getUndo(String path, Promise promise) {
         worker.execute(() -> {
             try {
-                File meta = metaFile(path);
-                File backup = backupFile(path);
-                if (!meta.exists() || !backup.exists()) {
+                File dir = undoDirFor(path);
+                if (dir == null) {
                     promise.resolve(null);
                     return;
                 }
-                WritableMap record = readMeta(meta);
+                WritableMap record = readMeta(metaFile(dir, path));
                 // Checked BEFORE any handwriting is moved back: if the PDF changed since
                 // the insert, the restore would be refused after the marks had moved.
                 record.putBoolean("matches",
@@ -133,11 +227,13 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     public void undoLastInsert(String path, Promise promise) {
         worker.execute(() -> {
             try {
-                File meta = metaFile(path);
-                File backup = backupFile(path);
-                if (!meta.exists() || !backup.exists()) {
-                    throw new PdfEditError("PDF_NO_UNDO", "There is no insert to undo for this PDF.");
+                File dir = undoDirFor(path);
+                if (dir == null) {
+                    throw new PdfEditError("PDF_NO_UNDO",
+                            "There is no insert to undo for this PDF (its backup may have been on an SD card that was removed).");
                 }
+                File meta = metaFile(dir, path);
+                File backup = backupFile(dir, path);
                 WritableMap record = readMeta(meta);
                 File target = new File(path);
                 if (target.length() != record.getDouble("finalSize")) {
@@ -145,10 +241,8 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
                             "This PDF has changed since the pages were inserted, so undo was cancelled.");
                 }
                 writeOver(backup, target, null);
-                //noinspection ResultOfMethodCallIgnored
-                backup.delete();
-                //noinspection ResultOfMethodCallIgnored
-                meta.delete();
+                deleteQuietly(backup);
+                deleteQuietly(meta);
                 promise.resolve(record);
             } catch (PdfEditError e) {
                 promise.reject(e.code, e.getMessage());
@@ -162,7 +256,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     // ---------------------------------------------------------------------------------------
 
     private WritableMap doInsert(String path, int anchorIndex, String position, int count,
-                                 String background) throws Exception {
+                                 String background, String space) throws Exception {
         if (count < 1 || count > MAX_PAGES) {
             throw new PdfEditError("PDF_BAD_COUNT", "Insert between 1 and " + MAX_PAGES + " pages.");
         }
@@ -172,14 +266,17 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
             throw new PdfEditError("PDF_NOT_FOUND", "The PDF could not be found.");
         }
         ensurePdfBox();
-        File workDir = workDir();
-        File built = new File(workDir, "insert-" + System.currentTimeMillis() + ".pdf");
+        File workDir = resolveWorkDir(space, path);
         long sourceSize = source.length();
         long sourceModified = source.lastModified();
+        appendLog("native: working in " + workDir + " (free " + workDir.getUsableSpace() / (1024 * 1024)
+                + "MB), pdf " + sourceSize / 1024 + "KB");
+        ensureSpace(workDir, sourceSize);
+        File built = new File(workDir, "insert-" + System.currentTimeMillis() + ".pdf");
 
         int originalCount;
         int firstInserted;
-        try (PDDocument doc = load(source)) {
+        try (PDDocument doc = load(source, workDir)) {
             if (doc.isEncrypted()) {
                 throw new PdfEditError("PDF_LOCKED", "This PDF is locked and can't be changed.");
             }
@@ -207,35 +304,29 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
             }
             doc.save(built);
         }
+        appendLog("native: saved new PDF " + built.length() / 1024 + "KB");
 
         // Verify with a fresh parser before anything touches the original.
-        try (PDDocument check = load(built)) {
+        try (PDDocument check = load(built, workDir)) {
             int finalCount = check.getPages().getCount();
             if (finalCount != originalCount + count) {
                 throw new PdfEditError("PDF_VERIFY_FAILED", "The edited PDF did not check out, so nothing was changed.");
             }
         }
         if (source.length() != sourceSize || source.lastModified() != sourceModified) {
-            //noinspection ResultOfMethodCallIgnored
-            built.delete();
+            deleteQuietly(built);
             throw new PdfEditError("PDF_CHANGED", "The PDF changed while the pages were being added. Try again.");
         }
 
         // Back up the original (replacing any older backup of this PDF), then write over it.
-        File backup = backupFile(path);
-        File backupTmp = new File(backup.getPath() + ".tmp");
-        copy(source, backupTmp);
-        if (backup.exists() && !backup.delete()) {
-            throw new PdfEditError("PDF_EDIT_FAILED", "Could not replace the previous backup.");
-        }
-        if (!backupTmp.renameTo(backup)) {
-            throw new PdfEditError("PDF_EDIT_FAILED", "Could not store the backup.");
-        }
+        // Written straight to its final name: a temp file + rename + delete needs deletes
+        // the plugin host may refuse on external storage.
+        File backup = backupFile(workDir, path);
+        copy(source, backup);
         try {
             writeOver(built, source, backup);
         } finally {
-            //noinspection ResultOfMethodCallIgnored
-            built.delete();
+            deleteQuietly(built);
         }
 
         WritableMap result = Arguments.createMap();
@@ -244,14 +335,20 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         result.putInt("finalCount", originalCount + count);
         result.putInt("firstInsertedIndex", firstInserted);
         result.putInt("count", count);
-        writeMeta(path, originalCount, firstInserted, count, source.length());
-        pruneBackups();
+        writeMeta(workDir, path, originalCount, firstInserted, count, source.length());
+        dropOtherBackups(workDir, path);
+        pruneBackups(workDir);
         return result;
     }
 
-    private PDDocument load(File file) throws IOException, PdfEditError {
+    /**
+     * PDFBox keeps its working copy of the PDF in temp FILES in the chosen working space,
+     * not in memory: the plugin host's memory is limited, and a PDFBox default (in-memory)
+     * load is the likely cause of other page-insert plugins crashing on 30 MB+ PDFs.
+     */
+    private PDDocument load(File file, File tempDir) throws IOException, PdfEditError {
         try {
-            return PDDocument.load(file, MemoryUsageSetting.setupTempFileOnly());
+            return PDDocument.load(file, MemoryUsageSetting.setupTempFileOnly().setTempDir(tempDir));
         } catch (InvalidPasswordException e) {
             throw new PdfEditError("PDF_LOCKED", "This PDF is locked and can't be changed.");
         }
@@ -340,20 +437,192 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
 
     // ---- backups -------------------------------------------------------------------------
 
-    private File workDir() throws PdfEditError {
-        File dir = new File(reactContext.getFilesDir(), "snshelf-pdf");
+    private File internalDir() throws PdfEditError {
+        return ensureDir(new File(reactContext.getFilesDir(), "snshelf-pdf"));
+    }
+
+    /** The SD card's working folder (null if none usable), its volume root, and why. */
+    private static final class SdSpace {
+        File dir;
+        String root;
+        String reason = "";
+    }
+
+    /**
+     * Looks for a writable working folder on a removable SD card, in order:
+     *  1. the app's own folder Android reports on the card (getExternalFilesDirs);
+     *  2. that same app folder built from the card's root, in case Android didn't report it;
+     *  3. a hidden .shelf-work folder at the top of the card.
+     * The first one that can be created and written wins; `reason` says what happened, so
+     * the Insert Page screen can explain a missing SD option (device report 2026-09-19).
+     */
+    private SdSpace findSd() {
+        SdSpace sd = new SdSpace();
+        List<String> roots = new ArrayList<>();
+        List<File> candidates = new ArrayList<>();
+        StringBuilder why = new StringBuilder();
+        try {
+            File[] dirs = reactContext.getExternalFilesDirs(null);
+            if (dirs != null) {
+                for (File dir : dirs) {
+                    if (dir == null) continue;
+                    String path = dir.getAbsolutePath();
+                    int android = path.indexOf("/Android/");
+                    if (android <= 0) continue;
+                    String root = path.substring(0, android);
+                    if (root.startsWith("/storage/emulated")) continue;
+                    if (!roots.contains(root)) roots.add(root);
+                    candidates.add(new File(dir, "snshelf-pdf"));
+                }
+            }
+        } catch (Throwable t) {
+            why.append("app folders unavailable (").append(t.getMessage()).append("); ");
+        }
+        File[] volumes = new File("/storage").listFiles();
+        if (volumes != null) {
+            for (File volume : volumes) {
+                String name = volume.getName();
+                if (name.equals("emulated") || name.equals("self") || !volume.isDirectory()) continue;
+                String root = volume.getAbsolutePath();
+                if (!roots.contains(root)) roots.add(root);
+            }
+        }
+        if (roots.isEmpty()) {
+            sd.reason = "no SD card found";
+            return sd;
+        }
+        String pkg = reactContext.getPackageName();
+        for (String root : roots) {
+            candidates.add(new File(root + "/Android/data/" + pkg + "/files/snshelf-pdf"));
+            candidates.add(new File(root + "/.shelf-work"));
+        }
+        for (File candidate : candidates) {
+            boolean made = candidate.isDirectory() || candidate.mkdirs();
+            if (made && isWritable(candidate)) {
+                sd.dir = candidate;
+                sd.root = rootOf(candidate, roots);
+                sd.reason = "using " + candidate.getAbsolutePath();
+                return sd;
+            }
+            why.append(candidate.getAbsolutePath()).append(made ? ": not writable; " : ": can't create; ");
+        }
+        sd.root = roots.get(0);
+        sd.reason = "SD card " + roots.get(0) + " found, but " + why.toString().trim();
+        return sd;
+    }
+
+    private static String rootOf(File dir, List<String> roots) {
+        String path = dir.getAbsolutePath();
+        for (String root : roots) {
+            if (path.startsWith(root + "/")) return root;
+        }
+        return null;
+    }
+
+    private static File ensureDir(File dir) throws PdfEditError {
         if (!dir.isDirectory() && !dir.mkdirs()) {
             throw new PdfEditError("PDF_EDIT_FAILED", "Shelf could not create its working folder.");
         }
         return dir;
     }
 
-    private File backupFile(String path) throws Exception {
-        return new File(workDir(), key(path) + ".pdf");
+    /**
+     * Deletes if allowed. The plugin host refuses deletes on external storage without DELETE
+     * permission, and a cleanup delete that throws took down a whole insert (device log,
+     * 2026-09-19: "has no DELETE permission on external storage"). Cleanup must never fail.
+     */
+    private static void deleteQuietly(File file) {
+        try {
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+        } catch (Throwable t) {
+            Log.w(TAG, "could not delete " + file, t);
+        }
     }
 
-    private File metaFile(String path) throws Exception {
-        return new File(workDir(), key(path) + ".json");
+    /** Writes a small file and LEAVES it: deleting it needs a permission we may not have. */
+    private static boolean isWritable(File dir) {
+        try (OutputStream out = new FileOutputStream(new File(dir, ".shelf-write-check"))) {
+            out.write(1);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 'same' = the PDF's own storage; 'sd' / 'internal' = the user's explicit choice. */
+    private File resolveWorkDir(String space, String pdfPath) throws PdfEditError {
+        if ("internal".equals(space)) {
+            return internalDir();
+        }
+        SdSpace sd = findSd();
+        boolean pdfOnSd = sd.root != null && pdfPath.startsWith(sd.root + "/");
+        if ("sd".equals(space) || pdfOnSd) {
+            if (sd.dir == null) {
+                if ("same".equals(space)) {
+                    // The PDF is on the card but no card folder is usable: work internally
+                    // (the space check still protects internal storage).
+                    return internalDir();
+                }
+                throw new PdfEditError("PDF_SD_NOT_WRITABLE",
+                        "Shelf can't use the SD card (" + sd.reason + "). Choose Internal as the working space.");
+            }
+            return sd.dir;
+        }
+        return internalDir();
+    }
+
+    private void ensureSpace(File workDir, long pdfSize) throws PdfEditError {
+        long needed = pdfSize * SPACE_FACTOR + SPACE_MARGIN;
+        long free = workDir.getUsableSpace();
+        if (free < needed) {
+            boolean onSd = workDir.getAbsolutePath().startsWith(internalDir().getAbsolutePath()) ? false : true;
+            throw new PdfEditError("PDF_NO_SPACE", String.format(
+                    "Not enough free space on %s: this PDF needs about %d MB free and %d MB is available. "
+                            + "Nothing was changed. Choose the other working space, or free up space.",
+                    onSd ? "the SD card" : "internal storage",
+                    needed / (1024 * 1024), free / (1024 * 1024)));
+        }
+    }
+
+    /** The working space holding this PDF's undo backup, or null. */
+    private File undoDirFor(String path) throws Exception {
+        List<File> dirs = new ArrayList<>();
+        dirs.add(internalDir());
+        File sd = findSd().dir;
+        if (sd != null) dirs.add(sd);
+        for (File dir : dirs) {
+            if (metaFile(dir, path).exists() && backupFile(dir, path).exists()) {
+                return dir;
+            }
+        }
+        return null;
+    }
+
+    /** One undo per PDF: drop an older backup of it kept in the other working space. */
+    private void dropOtherBackups(File keep, String path) {
+        try {
+            List<File> dirs = new ArrayList<>();
+            dirs.add(internalDir());
+            File sd = findSd().dir;
+            if (sd != null) dirs.add(sd);
+            for (File dir : dirs) {
+                if (!dir.getAbsolutePath().equals(keep.getAbsolutePath())) {
+                    deleteQuietly(backupFile(dir, path));
+                    deleteQuietly(metaFile(dir, path));
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "dropOtherBackups", t);
+        }
+    }
+
+    private static File backupFile(File dir, String path) throws Exception {
+        return new File(dir, key(path) + ".pdf");
+    }
+
+    private static File metaFile(File dir, String path) throws Exception {
+        return new File(dir, key(path) + ".json");
     }
 
     private static String key(String path) throws Exception {
@@ -365,8 +634,8 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         return sb.toString();
     }
 
-    private void writeMeta(String path, int originalCount, int firstInserted, int count, long finalSize)
-            throws Exception {
+    private void writeMeta(File dir, String path, int originalCount, int firstInserted, int count,
+                           long finalSize) throws Exception {
         JSONObject json = new JSONObject();
         json.put("path", path);
         json.put("originalCount", originalCount);
@@ -374,7 +643,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         json.put("count", count);
         json.put("finalSize", finalSize);
         json.put("time", System.currentTimeMillis());
-        try (OutputStream out = new FileOutputStream(metaFile(path))) {
+        try (OutputStream out = new FileOutputStream(metaFile(dir, path))) {
             out.write(json.toString().getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -400,31 +669,38 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         return map;
     }
 
-    /** Keeps at most 5 PDFs' backups, none older than 30 days. */
-    private void pruneBackups() {
+    /**
+     * Per working space: at most 5 PDFs' backups, none older than 30 days, and no more than
+     * 500 MB in total (newest kept first). Also removes leftovers of interrupted inserts.
+     */
+    private void pruneBackups(File dir) {
         try {
-            File[] metas = workDir().listFiles((dir, name) -> name.endsWith(".json"));
-            if (metas == null) return;
-            List<File> sorted = new ArrayList<>(Arrays.asList(metas));
-            sorted.sort(Comparator.comparingLong(File::lastModified).reversed());
+            File[] metas = dir.listFiles((d, name) -> name.endsWith(".json"));
             long now = System.currentTimeMillis();
-            for (int i = 0; i < sorted.size(); i++) {
-                File meta = sorted.get(i);
-                if (i >= BACKUP_MAX_COUNT || now - meta.lastModified() > BACKUP_MAX_AGE_MS) {
+            if (metas != null) {
+                List<File> sorted = new ArrayList<>(Arrays.asList(metas));
+                sorted.sort(Comparator.comparingLong(File::lastModified).reversed());
+                long total = 0;
+                for (int i = 0; i < sorted.size(); i++) {
+                    File meta = sorted.get(i);
                     String base = meta.getName().substring(0, meta.getName().length() - 5);
-                    //noinspection ResultOfMethodCallIgnored
-                    new File(meta.getParentFile(), base + ".pdf").delete();
-                    //noinspection ResultOfMethodCallIgnored
-                    meta.delete();
+                    File backup = new File(dir, base + ".pdf");
+                    total += backup.length();
+                    boolean keep = i < BACKUP_MAX_COUNT
+                            && now - meta.lastModified() <= BACKUP_MAX_AGE_MS
+                            && (i == 0 || total <= BACKUP_MAX_BYTES);
+                    if (!keep) {
+                        deleteQuietly(backup);
+                        deleteQuietly(meta);
+                    }
                 }
             }
-            // Leftover build files from an interrupted insert.
-            File[] stale = workDir().listFiles((dir, name) -> name.startsWith("insert-") || name.endsWith(".tmp"));
+            File[] stale = dir.listFiles((d, name) -> name.startsWith("insert-") || name.endsWith(".tmp")
+                    || name.startsWith("PDFBox") || name.endsWith(".tmp.pdf"));
             if (stale != null) {
                 for (File f : stale) {
-                    if (now - f.lastModified() > 60 * 60 * 1000) {
-                        //noinspection ResultOfMethodCallIgnored
-                        f.delete();
+                    if (now - f.lastModified() > 60 * 60 * 1000 && !f.getName().equals(".shelf-write-check")) {
+                        deleteQuietly(f);
                     }
                 }
             }

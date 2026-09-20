@@ -39,20 +39,18 @@ export async function getCurrentTarget(): Promise<ShelfTarget> {
   return makeShelfTarget(path, page);
 }
 
-export async function chooseShelfFiles(
-  startFolder?: string,
-): Promise<ShelfTarget[]> {
+export async function chooseShelfFiles(): Promise<ShelfTarget[]> {
   if (!(await ensureFileReadPermission())) {
     throw new Error('File access was not allowed.');
   }
+  // Opens at the picker's own starting point. Starting it in a project folder
+  // (needSelectFolder) made Up leave the picker instead of moving up a folder
+  // (device report, 2026-09-19).
   const selected = (await RattaFileSelector.selectFile({
     selectType: 0, // 0 = normal (multi) selection; 1 = single-file mode
     maxNum: 9,
     title: 'Add to Shelf',
     rightButtonText: 'Add',
-    // Start in the project's folder; without limitPath the user can still
-    // navigate anywhere on the device.
-    ...(startFolder ? {needSelectFolder: startFolder} : {}),
   })) as string[] | null | undefined;
   return (selected ?? [])
     .filter(path => typeof path === 'string' && path.length > 0)

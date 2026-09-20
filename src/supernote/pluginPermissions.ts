@@ -65,6 +65,6 @@ export function ensureFileWritePermission(): Promise<boolean> {
 export function ensureFileDeletePermission(): Promise<boolean> {
   return ensurePluginPermission(
     FILE_DELETE_PERMISSION,
-    'Allow Shelf to remove a shelf-quote text file after it is safely imported.',
+    'Allow Shelf to tidy up after itself: remove an imported shelf-quote file, and its own working files when adding pages to a PDF.',
   );
 }

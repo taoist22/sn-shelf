@@ -14,6 +14,7 @@ import {
   loadPersistedShelfState,
   savePersistedShelfState,
   type HeadingText,
+  type PdfWorkSpace,
   type PersistedShelfState,
 } from './nativeShelfStorage';
 
@@ -236,4 +237,14 @@ export function shiftDocumentPages(
     persist();
   }
   return moved;
+}
+
+/** Where Insert Page works: the PDF's own storage unless the user chose otherwise. */
+export function getPdfWorkSpace(): PdfWorkSpace {
+  return state.pdfWorkSpace ?? 'same';
+}
+
+export function setPdfWorkSpace(space: PdfWorkSpace): void {
+  state.pdfWorkSpace = space;
+  persist();
 }
