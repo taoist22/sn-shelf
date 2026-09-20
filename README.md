@@ -222,6 +222,27 @@ change, because its text was never what made it big.
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
 
+## Changes in 0.2.7
+
+- **PDFs over 25 MB are refused**, with a warning from 10 MB. A 38.5 MB,
+  930-page book took 34 seconds to gain a page, and the device's own reader
+  was already slow with it. See **PDF size limit** above for how to shrink a
+  PDF for the device.
+- **Insert Page can work on the SD card.** Choose where Shelf does the heavy
+  work and keeps its undo backup: same volume as the PDF (the default), the
+  SD card, or internal storage. Free space is shown for each and checked
+  before starting.
+- **Fixed: Insert Page did nothing on an SD-card PDF.** Shelf's own
+  write-check cleanup tripped the plugin host's delete rules and aborted the
+  insert with nothing on screen to say why.
+- **Fixed: Insert Page could hang** after stepping out to a note, because a
+  plugin's timers stop while its panel is hidden.
+- **Faster on large PDFs**: the edited file is no longer parsed twice.
+- **Browse uses the device's own file picker again** instead of Shelf's
+  folder browser, which showed raw Android paths.
+- **Insert Page writes a log** to `EXPORT/shelf-log.txt`, which you can
+  download with Browse & Access if something goes wrong.
+
 ## Changes in 0.2.6
 
 - **Handwritten notes on quotes**: write your own note in real ink on the
