@@ -15,6 +15,7 @@ import {
 import {scanPageObstacles, type ObstacleScan} from './pageObstacles';
 import {insertInkStrokes, invalidateStrokeStyles} from './inkStrokes';
 import {inkScale} from '../domain/quoteInk';
+import {isImageFile} from '../domain/pdfInsertion';
 import {measurePlacedText} from './textMetrics';
 import {ensureFileReadPermission} from './pluginPermissions';
 
@@ -55,6 +56,33 @@ export async function chooseShelfFiles(): Promise<ShelfTarget[]> {
   return (selected ?? [])
     .filter(path => typeof path === 'string' && path.length > 0)
     .map(path => makeShelfTarget(path, 0, true));
+}
+
+/**
+ * Picks ONE image with the device's own file picker, for an Insert Page template.
+ * The picker has no type filter, so a wrong pick is caught here rather than in
+ * PDFBox. Returns null when the user backs out.
+ */
+export async function chooseTemplateImage(): Promise<string | null> {
+  if (!(await ensureFileReadPermission())) {
+    throw new Error('File access was not allowed.');
+  }
+  const selected = (await RattaFileSelector.selectFile({
+    selectType: 0, // 0 = normal selection; 1 opens the file and never resolves
+    maxNum: 1,
+    title: 'Choose a template image',
+    rightButtonText: 'Use',
+  })) as string[] | null | undefined;
+  const path = (selected ?? []).find(
+    entry => typeof entry === 'string' && entry.length > 0,
+  );
+  if (!path) {
+    return null;
+  }
+  if (!isImageFile(path)) {
+    throw new Error('That is not a PNG or JPEG. Choose an image file.');
+  }
+  return path;
 }
 
 function linkTypeForKind(kind: ShelfKind): number {

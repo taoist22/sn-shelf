@@ -1,6 +1,12 @@
 import {NativeModules} from 'react-native';
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
 import {isQuoteInk} from '../domain/quoteInk';
+import {
+  isImageFile,
+  MAX_TEMPLATES,
+  parseTemplateSize,
+  type TemplateSize,
+} from '../domain/pdfInsertion';
 import {fileTitle} from '../domain/shelfItem';
 
 export type HeadingText = {
@@ -21,12 +27,26 @@ export type PersistedShelfState = {
   inboxQuotes: ShelfQuote[];
   /** Where Insert Page does its heavy work; absent = 'same' (the PDF's storage). */
   pdfWorkSpace?: PdfWorkSpace;
+  /** Recently inserted template images, newest first. */
+  pdfTemplates?: string[];
+  /** How much of the page a template image fills; absent = 'margin'. */
+  pdfTemplateSize?: TemplateSize;
+  /** Re-encode template images for e-ink; absent = on. */
+  pdfTemplateShrink?: boolean;
 };
 
 export type PdfWorkSpace = 'same' | 'sd' | 'internal';
 
 function parsePdfWorkSpace(value: unknown): PdfWorkSpace | undefined {
   return value === 'same' || value === 'sd' || value === 'internal' ? value : undefined;
+}
+
+function parsePdfTemplates(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((entry): entry is string => typeof entry === 'string' && isImageFile(entry))
+        .slice(0, MAX_TEMPLATES)
+    : [];
 }
 
 type ShelfStorageModule = {
@@ -173,6 +193,9 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
     headingTexts?: unknown;
     inboxQuotes?: unknown;
     pdfWorkSpace?: unknown;
+    pdfTemplates?: unknown;
+    pdfTemplateSize?: unknown;
+    pdfTemplateShrink?: unknown;
     items?: unknown;
     returnTarget?: unknown;
   };
@@ -198,6 +221,10 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
       headingTexts: parseHeadingTexts(value.headingTexts),
       inboxQuotes: parseQuotes(value.inboxQuotes),
       pdfWorkSpace: parsePdfWorkSpace(value.pdfWorkSpace),
+      pdfTemplates: parsePdfTemplates(value.pdfTemplates),
+      pdfTemplateSize: parseTemplateSize(value.pdfTemplateSize),
+      pdfTemplateShrink:
+        typeof value.pdfTemplateShrink === 'boolean' ? value.pdfTemplateShrink : undefined,
     };
   }
 

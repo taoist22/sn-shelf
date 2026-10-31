@@ -1,5 +1,6 @@
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
 import {normalizeDevicePath, projectNoteTarget} from '../domain/shelfItem';
+import {rememberTemplate, type TemplateSize} from '../domain/pdfInsertion';
 import {
   createProject,
   deleteProject,
@@ -247,4 +248,35 @@ export function getPdfWorkSpace(): PdfWorkSpace {
 export function setPdfWorkSpace(space: PdfWorkSpace): void {
   state.pdfWorkSpace = space;
   persist();
+}
+
+/** Template images used recently, newest first, for the Insert Page screen. */
+export function getPdfTemplates(): string[] {
+  return state.pdfTemplates ?? [];
+}
+
+/** How much of the page a template image fills; the choice sticks between inserts. */
+export function getPdfTemplateSize(): TemplateSize {
+  return state.pdfTemplateSize ?? 'margin';
+}
+
+export function setPdfTemplateSize(size: TemplateSize): void {
+  state.pdfTemplateSize = size;
+  persist();
+}
+
+/** Whether template images are re-encoded for e-ink; on unless the user turned it off. */
+export function getPdfTemplateShrink(): boolean {
+  return state.pdfTemplateShrink ?? true;
+}
+
+export function setPdfTemplateShrink(shrink: boolean): void {
+  state.pdfTemplateShrink = shrink;
+  persist();
+}
+
+export function rememberPdfTemplate(path: string): string[] {
+  state.pdfTemplates = rememberTemplate(getPdfTemplates(), path);
+  persist();
+  return state.pdfTemplates;
 }

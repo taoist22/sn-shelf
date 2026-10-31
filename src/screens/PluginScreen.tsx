@@ -12,6 +12,7 @@ import {
   View,
 } from 'react-native';
 import {PluginManager} from 'sn-plugin-lib';
+import {JS_BUILD} from '../app/shelfBuild';
 import {
   consumePendingCapture,
   SHELF_CAPTURE_EVENT,
@@ -28,6 +29,12 @@ import {
   type ShelfTarget,
 } from '../domain/shelfItem';
 import {PDF_LIMIT_HINT, PDF_LIMIT_MB, pdfLargeNote, pdfSizeLevel} from '../domain/pdfSize';
+import {
+  TEMPLATE_SIZES,
+  templateScale,
+  templateSizeLabel,
+  type TemplateSize,
+} from '../domain/pdfInsertion';
 import type {ShelfContext} from '../domain/shelfState';
 import {checkPdfSize} from '../supernote/pdfSizeGate';
 import {
@@ -36,6 +43,7 @@ import {
 } from '../supernote/nativeShelfNavigation';
 import {
   chooseShelfFiles,
+  chooseTemplateImage,
   getCurrentTarget,
   insertQuoteIntoCurrentNote,
   readSelectedText,
@@ -60,6 +68,12 @@ import {
   saveProjectReferences,
   getPdfWorkSpace,
   setPdfWorkSpace,
+  getPdfTemplates,
+  getPdfTemplateSize,
+  getPdfTemplateShrink,
+  rememberPdfTemplate,
+  setPdfTemplateSize,
+  setPdfTemplateShrink,
   setProjectWorkingNote,
   shiftDocumentPages,
 } from '../storage/sessionShelf';
@@ -89,6 +103,8 @@ import {
   getPdfUndo,
   getPdfWorkSpaces,
   insertPdfPages,
+  isShelfInsertedPage,
+  removePdfPage,
   movePageMarks,
   pageMarkCount,
   pdfEditErrorMessage,
@@ -143,6 +159,14 @@ type PdfInsertState = {
   position: InsertPosition;
   count: number;
   background: InsertBackground;
+  /** The template image for background 'image'; empty until one is chosen. */
+  imagePath: string;
+  /** Recently used template images, newest first. */
+  templates: string[];
+  /** How much of the page a template image fills. */
+  imageSize: TemplateSize;
+  /** Re-encode the template for e-ink instead of embedding it as it is. */
+  shrink: boolean;
   /** Where the heavy work happens; offered only when an SD card is usable. */
   space: PdfWorkSpace;
   spaces: PdfWorkSpaces | null;
@@ -151,8 +175,23 @@ type PdfInsertState = {
   warning: string | null;
   /** Shown before undoing when the added pages have handwriting. */
   undoWarning: string | null;
+  /** Shown before removing the page the reader is on. */
+  removeWarning: string | null;
   error: string;
 };
+
+/** Last path segment, for naming a chosen template image on screen. */
+function fileName(path: string): string {
+  const parts = path.split('/');
+  return parts[parts.length - 1] || path;
+}
+
+/**
+ * How long Insert stays deaf after the file picker closes. The plugin panel can sit above a
+ * later-launched picker, so the tap that chooses a file can arrive here as the picker goes
+ * away — and start an insert the user never asked for.
+ */
+const PICKER_SETTLE_MS = 1500;
 
 /** Marks the synthetic working-note card — not a real reference entry. */
 const WORKING_CARD_ID = '__working__';
@@ -277,6 +316,8 @@ export function PluginScreen(): React.JSX.Element {
   // True while Insert Page / Undo is stepping between files. Opening another
   // file can fire lifecycle resets; they must not wipe the progress screen.
   const pdfOperationRef = useRef(false);
+  /** When the file picker last closed; see PICKER_SETTLE_MS. */
+  const pickerClosedRef = useRef(0);
   const detailGeneration = useRef(0);
 
   // Placement failures render large and bold so the user can tell at a
@@ -520,7 +561,13 @@ export function PluginScreen(): React.JSX.Element {
         setStatus('Insert Page works on PDFs only.');
         return;
       }
-      await shelfLog(`--- Insert Page opened on ${current.path} page ${current.page + 1}`);
+      // Ask before the first log line: shelf-log.txt lives in EXPORT, so without write
+      // permission every line up to the insert's own request was silently dropped and the
+      // log began mid-flow (device log, 2026-10-30).
+      await ensureFileWritePermission();
+      await shelfLog(
+        `--- Insert Page opened on ${current.path} page ${current.page + 1} (js ${JS_BUILD})`,
+      );
       const size = await checkPdfSize(current);
       if (size.level === 'tooLarge') {
         await shelfLog(`refused: ${size.bytes} bytes is over the limit`);
@@ -537,16 +584,65 @@ export function PluginScreen(): React.JSX.Element {
         position: 'after',
         count: 1,
         background: 'lined',
+        imagePath: '',
+        templates: getPdfTemplates(),
+        imageSize: getPdfTemplateSize(),
+        shrink: getPdfTemplateShrink(),
         space: getPdfWorkSpace(),
         spaces,
         undo: undo && undo.path === current.path ? undo : null,
         warning: null,
         undoWarning: null,
+        removeWarning: null,
         error: '',
       });
     } catch (error) {
       setStatus(`Could not read the open PDF: ${String(error)}`);
     }
+  }, []);
+
+  // Choosing a template keeps it in the recent list, so a template used often is
+  // one tap away instead of a walk through the file picker.
+  const pickTemplate = useCallback(async () => {
+    try {
+      const path = await chooseTemplateImage();
+      // The panel can sit above a later-launched picker, so a tap meant for the
+      // picker can land on this screen as it closes. runPdfInsert ignores an
+      // Insert that arrives within a moment of this.
+      pickerClosedRef.current = Date.now();
+      if (!path) {
+        return;
+      }
+      const templates = rememberPdfTemplate(path);
+      setPdfInsert(previous =>
+        previous
+          ? {...previous, background: 'image', imagePath: path, templates, warning: null, error: ''}
+          : previous,
+      );
+    } catch (error) {
+      setPdfInsert(previous =>
+        previous ? {...previous, error: String(error instanceof Error ? error.message : error)} : previous,
+      );
+    }
+  }, []);
+
+  const selectTemplate = useCallback((path: string) => {
+    const templates = rememberPdfTemplate(path);
+    setPdfInsert(previous =>
+      previous
+        ? {...previous, background: 'image', imagePath: path, templates, warning: null, error: ''}
+        : previous,
+    );
+  }, []);
+
+  const toggleShrink = useCallback((shrink: boolean) => {
+    setPdfTemplateShrink(shrink);
+    setPdfInsert(previous => (previous ? {...previous, shrink, error: ''} : previous));
+  }, []);
+
+  const chooseTemplateSize = useCallback((imageSize: TemplateSize) => {
+    setPdfTemplateSize(imageSize);
+    setPdfInsert(previous => (previous ? {...previous, imageSize, error: ''} : previous));
   }, []);
 
   const chooseWorkSpace = useCallback((space: PdfWorkSpace) => {
@@ -558,7 +654,7 @@ export function PluginScreen(): React.JSX.Element {
   const updatePdfInsert = useCallback((change: Partial<PdfInsertState>) => {
     setPdfInsert(previous =>
       previous
-        ? {...previous, ...change, warning: null, undoWarning: null, error: ''}
+        ? {...previous, ...change, warning: null, undoWarning: null, removeWarning: null, error: ''}
         : previous,
     );
   }, []);
@@ -608,6 +704,15 @@ export function PluginScreen(): React.JSX.Element {
       // Best effort only: without it Shelf cannot tidy up its working files on
       // external storage, but inserts still work (device log, 2026-09-19).
       await shelfLog(`delete permission: ${await ensureFileDeletePermission()}`);
+      const sincePicker = Date.now() - pickerClosedRef.current;
+      if (sincePicker < PICKER_SETTLE_MS) {
+        await shelfLog(`ignored Insert ${sincePicker}ms after the picker closed`);
+        return;
+      }
+      if (request.background === 'image' && !request.imagePath) {
+        setPdfInsert({...request, error: 'Choose a template image first.'});
+        return;
+      }
       // Read while the PDF is still open: getMarkPages is refused once it is closed.
       const marked = await readMarkedPages(request.path);
       await shelfLog(`marked pages: ${JSON.stringify(marked)}`);
@@ -655,6 +760,9 @@ export function PluginScreen(): React.JSX.Element {
           request.count,
           request.background,
           request.space,
+          request.imagePath,
+          templateScale(request.imageSize),
+          request.shrink,
         );
       } catch (error) {
         await fail(pdfEditErrorMessage(error), true);
@@ -710,6 +818,123 @@ export function PluginScreen(): React.JSX.Element {
   // Reverse of the insert, also with the PDF closed: handwriting on the added
   // pages goes with them (asked first), later pages' handwriting moves back
   // down, then the PDF is restored from its backup.
+  /**
+   * Takes out the page the reader is on, if Shelf added it. The /ShelfInserted stamp is
+   * checked FIRST, while the PDF is still open, so a page of the user's own document is
+   * refused without closing what they are reading. Handwriting on later pages moves down
+   * before the page goes, because a mark can only move to a page that exists.
+   */
+  const runPdfRemove = useCallback(
+    async (confirmed: boolean) => {
+      const request = pdfInsert;
+      if (!request) {
+        return;
+      }
+      const page = request.anchor;
+      await shelfLog(`Remove tapped: page ${page + 1}, confirmed ${confirmed}`);
+      if (!(await ensureFileReadPermission()) || !(await ensureFileWritePermission())) {
+        setPdfInsert({...request, error: 'File access was not allowed, so the PDF was not changed.'});
+        return;
+      }
+      setPlacing('Checking the page…');
+      let isShelfPage: boolean;
+      try {
+        isShelfPage = await isShelfInsertedPage(request.path, page);
+      } catch (error) {
+        setPlacing(null);
+        setPdfInsert({...request, error: `Couldn't check this page: ${pdfEditErrorMessage(error)}`});
+        return;
+      }
+      setPlacing(null);
+      if (!isShelfPage) {
+        setPdfInsert({
+          ...request,
+          removeWarning: null,
+          error: `Page ${page + 1} is part of the original PDF, so Shelf won't remove it. Only pages Shelf added can be removed.`,
+        });
+        return;
+      }
+
+      const marked = await readMarkedPages(request.path);
+      await shelfLog(`marked pages: ${JSON.stringify(marked)}`);
+      if (marked === null) {
+        setPdfInsert({
+          ...request,
+          error: "Shelf couldn't read this PDF's handwriting, so the page was not removed.",
+        });
+        return;
+      }
+      if (!confirmed) {
+        const inked = (await pageMarkCount(request.path, page)) > 0;
+        setPdfInsert({
+          ...request,
+          removeWarning: inked
+            ? `Remove page ${page + 1}? You wrote on it, and that writing goes with the page — Undo puts the page back but not the writing.`
+            : `Remove page ${page + 1}?`,
+          error: '',
+        });
+        return;
+      }
+
+      const stepOut = noteToStepOutTo();
+      await shelfLog(`step out to: ${stepOut ? stepOut.path : 'NONE'}`);
+      if (!stepOut) {
+        setPdfInsert({...request, removeWarning: null, error: NO_NOTE_MESSAGE});
+        return;
+      }
+
+      pdfOperationRef.current = true;
+      const fail = async (message: string) => {
+        await shelfLog(`FAILED: ${message}`);
+        await openFileAndWait(request.path, request.anchor);
+        pdfOperationRef.current = false;
+        setPlacing(null);
+        setPdfInsert({...request, removeWarning: null, error: message});
+      };
+
+      setPlacing('Closing the PDF…');
+      if (!(await openFileAndWait(stepOut.path, -1))) {
+        await fail(`Couldn't step out of the PDF into ${stepOut.title}, so nothing was changed.`);
+        return;
+      }
+
+      const plan = planUndoMoves(marked, page, 1);
+      const done: MarkMove[] = [];
+      let result: PdfInsertResult;
+      try {
+        setPlacing('Moving your handwriting…');
+        for (const cleared of plan.clear) {
+          await clearPageMarks(request.path, cleared);
+        }
+        for (const move of plan.moves) {
+          if (await movePageMarks(request.path, move.from, move.to)) {
+            done.push(move);
+          }
+        }
+        setPlacing('Removing the page…');
+        result = await removePdfPage(request.path, page, request.space);
+      } catch (error) {
+        for (const back of rollbackMoves(done)) {
+          try {
+            await movePageMarks(request.path, back.from, back.to);
+          } catch {
+            // reported below
+          }
+        }
+        await fail(`The page was not removed (${pdfEditErrorMessage(error)}).`);
+        return;
+      }
+
+      shiftDocumentPages(request.path, p => pageAfterUndo(p, page, 1, result.originalCount));
+      await flushShelfState();
+      setPlacing('Reopening the PDF…');
+      await openFileAndWait(request.path, Math.min(page, result.finalCount - 1));
+      pdfOperationRef.current = false;
+      PluginManager.closePluginView();
+    },
+    [pdfInsert, noteToStepOutTo],
+  );
+
   const runPdfUndo = useCallback(
     async (confirmed: boolean) => {
       const request = pdfInsert;
@@ -736,11 +961,16 @@ export function PluginScreen(): React.JSX.Element {
         });
         return;
       }
+      // A removal is undone the other way round: the page comes back and handwriting
+      // moves UP onto it, and the page must exist before any mark can move there.
+      const isRemoveUndo = record.action === 'remove';
       const plan = planUndoMoves(marked, record.firstInsertedIndex, record.count);
       const inkedAdded: number[] = [];
-      for (const page of plan.clear) {
-        if ((await pageMarkCount(request.path, page)) > 0) {
-          inkedAdded.push(page);
+      if (!isRemoveUndo) {
+        for (const page of plan.clear) {
+          if ((await pageMarkCount(request.path, page)) > 0) {
+            inkedAdded.push(page);
+          }
         }
       }
       if (inkedAdded.length > 0 && !confirmed) {
@@ -773,19 +1003,30 @@ export function PluginScreen(): React.JSX.Element {
         return;
       }
 
-      setPlacing('Putting your handwriting back…');
       const done: MarkMove[] = [];
       try {
-        for (const page of inkedAdded) {
-          await clearPageMarks(request.path, page);
-        }
-        for (const move of plan.moves) {
-          if (await movePageMarks(request.path, move.from, move.to)) {
-            done.push(move);
+        if (isRemoveUndo) {
+          setPlacing('Putting the page back…');
+          await undoPdfInsert(request.path);
+          setPlacing('Putting your handwriting back…');
+          for (const move of planInsertMoves(marked, record.firstInsertedIndex, record.count)) {
+            if (await movePageMarks(request.path, move.from, move.to)) {
+              done.push(move);
+            }
           }
+        } else {
+          setPlacing('Putting your handwriting back…');
+          for (const page of inkedAdded) {
+            await clearPageMarks(request.path, page);
+          }
+          for (const move of plan.moves) {
+            if (await movePageMarks(request.path, move.from, move.to)) {
+              done.push(move);
+            }
+          }
+          setPlacing('Removing the added pages…');
+          await undoPdfInsert(request.path);
         }
-        setPlacing('Removing the added pages…');
-        await undoPdfInsert(request.path);
       } catch (error) {
         for (const back of rollbackMoves(done)) {
           try {
@@ -800,13 +1041,15 @@ export function PluginScreen(): React.JSX.Element {
         setPdfInsert({
           ...request,
           undoWarning: null,
-          error: `Undo did not finish (${pdfEditErrorMessage(error)}). The added pages are still in the PDF.`,
+          error: `Undo did not finish (${pdfEditErrorMessage(error)}). The PDF was left as it was.`,
         });
         return;
       }
 
       shiftDocumentPages(request.path, page =>
-        pageAfterUndo(page, record.firstInsertedIndex, record.count, record.originalCount),
+        isRemoveUndo
+          ? pageAfterInsert(page, record.firstInsertedIndex, record.count)
+          : pageAfterUndo(page, record.firstInsertedIndex, record.count, record.originalCount),
       );
       await flushShelfState();
       setPlacing('Reopening the PDF…');
@@ -1928,7 +2171,48 @@ export function PluginScreen(): React.JSX.Element {
           {renderChoice('Lined (8 mm)', request.background === 'lined', () =>
             updatePdfInsert({background: 'lined'}),
           )}
+          {renderChoice('Image…', request.background === 'image', () =>
+            updatePdfInsert({background: 'image'}),
+          )}
         </View>
+
+        {request.background === 'image' ? (
+          <>
+            <Text style={styles.captureInkHint}>
+              {request.imagePath
+                ? `Template: ${fileName(request.imagePath)}`
+                : 'No template chosen yet.'}
+            </Text>
+            <View style={styles.actionsRow}>
+              {renderChoice(request.imagePath ? 'Change…' : 'Choose…', false, pickTemplate)}
+              {request.templates
+                .filter(path => path !== request.imagePath)
+                .map(path => renderChoice(fileName(path), false, () => selectTemplate(path)))}
+            </View>
+            <Text style={styles.captureHeading}>{'SIZE'}</Text>
+            <View style={styles.actionsRow}>
+              {TEMPLATE_SIZES.map(size =>
+                renderChoice(templateSizeLabel(size), request.imageSize === size, () =>
+                  chooseTemplateSize(size),
+                ),
+              )}
+            </View>
+            <View style={styles.actionsRow}>
+              {renderChoice('Shrink for e-ink', request.shrink, () =>
+                toggleShrink(!request.shrink),
+              )}
+              {renderChoice('Embed as-is', !request.shrink, () => toggleShrink(false))}
+            </View>
+            <Text style={styles.captureInkHint}>
+              {request.shrink
+                ? 'Shrink re-encodes the image for the screen (grey, screen-sized), which keeps a template page to tens of KB instead of a megabyte.'
+                : 'As-is embeds the file unchanged — truest to the original, and the biggest.'}
+            </Text>
+            <Text style={styles.captureInkHint}>
+              {'A PNG or JPEG, centred on the page. You write on it as you would any page — the eraser only touches your ink.'}
+            </Text>
+          </>
+        ) : null}
 
         {request.spaces?.sdWritable ? (
           <>
@@ -1995,12 +2279,34 @@ export function PluginScreen(): React.JSX.Element {
           </Pressable>
         </View>
 
+        {request.removeWarning ? (
+          <View style={styles.pdfInsertWarning}>
+            <Text style={styles.statusStrong}>{request.removeWarning}</Text>
+          </View>
+        ) : null}
+        <View style={styles.actionsRow}>
+          <Pressable
+            style={styles.rowButtonSecondary}
+            onPress={() => runPdfRemove(request.removeWarning !== null)}>
+            <Text style={styles.rowButtonSecondaryText}>
+              {request.removeWarning
+                ? `Yes, Remove Page ${request.anchor + 1}`
+                : `Remove Page ${request.anchor + 1}…`}
+            </Text>
+          </Pressable>
+        </View>
+        <Text style={styles.captureInkHint}>
+          {'Only pages Shelf added can be removed; your own pages are refused.'}
+        </Text>
+
         {undo ? (
           <View style={styles.pdfInsertUndo}>
             <Text style={styles.detailMetaLine}>
-              {`Last insert: ${undo.count} page${undo.count === 1 ? '' : 's'} at page ${
-                undo.firstInsertedIndex + 1
-              }.`}
+              {undo.action === 'remove'
+                ? `Last change: page ${undo.firstInsertedIndex + 1} removed.`
+                : `Last insert: ${undo.count} page${undo.count === 1 ? '' : 's'} at page ${
+                    undo.firstInsertedIndex + 1
+                  }.`}
             </Text>
             {request.undoWarning ? (
               <Text style={styles.statusStrong}>{request.undoWarning}</Text>
@@ -2009,11 +2315,20 @@ export function PluginScreen(): React.JSX.Element {
               style={styles.rowButtonSecondary}
               onPress={() => runPdfUndo(request.undoWarning !== null)}>
               <Text style={styles.rowButtonSecondaryText}>
-                {request.undoWarning ? 'Undo Anyway' : 'Undo Last Insert'}
+                {request.undoWarning
+                  ? 'Undo Anyway'
+                  : undo.action === 'remove'
+                    ? `Put Page ${undo.firstInsertedIndex + 1} Back`
+                    : 'Undo Last Insert'}
               </Text>
             </Pressable>
           </View>
         ) : null}
+
+        {/* Both halves stamped: a log or a screenshot now says which code ran. */}
+        <Text style={styles.captureInkHint}>
+          {`Shelf js ${JS_BUILD} · native ${request.spaces?.nativeBuild ?? 'unknown — reinstall'}`}
+        </Text>
       </>
     );
   }

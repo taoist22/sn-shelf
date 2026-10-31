@@ -100,6 +100,9 @@ describe('parsePersistedShelfState', () => {
           capturedAt: 3,
         },
       ],
+      pdfTemplates: ['/MyStyle/Cornell.png'],
+      pdfTemplateSize: 'margin' as const,
+      pdfTemplateShrink: false,
     };
 
     expect(parsePersistedShelfState(JSON.stringify(original))).toEqual(original);

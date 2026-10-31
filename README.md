@@ -120,8 +120,22 @@ Pins land on the shelf you are looking at:
 While reading a PDF, open Shelf and tap **Insert Page…** (PDFs only).
 
 1. Choose **Before** or **After** the page you are on, how many pages
-   (1–20), and a background: **Blank** or **Lined** (8 mm, the same spacing
-   as Supernote's ruled template).
+   (1–20), and a background: **Blank**, **Lined** (8 mm, the same spacing as
+   Supernote's ruled template), or **Image…** — a PNG or JPEG from the
+   device, centred on the page at a **Size** you choose — Full (edge to
+   edge), Margin (94%) or Small (86%). Shelf remembers the last five
+   templates you used and your size choice, so a template you reach for
+   often is one tap away. **Shrink for e-ink** (on by default) re-encodes the
+   image for the screen before it goes in — line art becomes 1-bit, anything
+   shaded becomes grey, flattened to the 16 greys the screen can actually
+   show — which cut a 1.2 MB diagram to 258 KB on a Manta. **Embed as-is** keeps the file untouched
+   when you want fidelity over size.
+   You write on an inserted template exactly as you write on any PDF page,
+   and the eraser only touches your writing: the image is part of the page,
+   your ink is not. Keep templates at roughly the screen's own resolution
+   (about 1404 × 1872 for a Nomad, 1920 × 2560 for a Manta) — a page-sized
+   1-bit PNG costs tens of kilobytes, while a photo costs megabytes on every
+   page inserted. Images over 12 MB or 40 megapixels are refused.
 2. Tap **Insert**. Shelf briefly steps out of the PDF into a note (your
    project's working note, or the last note Shelf saw), adds the pages,
    moves your handwriting, and reopens the PDF on the first new page. A
@@ -130,11 +144,17 @@ While reading a PDF, open Shelf and tap **Insert Page…** (PDFs only).
    handwriting by page number, so inserting pages would normally leave
    everything after the insert point on the wrong pages. Shelf moves each
    later page's handwriting to its new page number.
-4. **Undo Last Insert** (on the same screen) removes the added pages and
+4. **Remove Page N…** (on the same screen) takes out the page you are on, but
+   **only if Shelf added it** — every page Shelf inserts is stamped inside the
+   PDF, and a page without that stamp is refused, so your own pages are safe
+   whatever you tap. Shelf asks first, and says so when you wrote on that
+   page: the writing goes with the page, and putting the page back does not
+   bring the writing back. Handwriting on later pages moves back down.
+5. **Undo Last Insert** (on the same screen) removes the added pages and
    moves the handwriting back. If you wrote on the added pages, Shelf asks
    first — that writing goes with them. Undo is refused if the PDF has
    changed since.
-5. If anything fails part-way, Shelf puts the PDF and the handwriting back
+6. If anything fails part-way, Shelf puts the PDF and the handwriting back
    as they were and says so.
 
 Inserting a page rewrites the whole PDF, so the file can grow by a few

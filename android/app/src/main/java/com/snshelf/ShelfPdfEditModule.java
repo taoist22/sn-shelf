@@ -1,5 +1,7 @@
 package com.snshelf;
 
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Environment;
 import android.util.Log;
 
@@ -18,6 +20,9 @@ import com.tom_roush.pdfbox.pdmodel.PDPageContentStream;
 import com.tom_roush.pdfbox.pdmodel.PDPageTree;
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle;
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException;
+import com.tom_roush.pdfbox.pdmodel.graphics.image.CCITTFactory;
+import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory;
+import com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject;
 
 import org.json.JSONObject;
 
@@ -62,7 +67,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     private static final COSName INSERTED_MARKER = COSName.getPDFName("ShelfInserted");
     private static final int MAX_PAGES = 20;
     /** Bumped with each native change; shown on screen and in the log to spot stale installs. */
-    static final int NATIVE_BUILD = 17;
+    static final int NATIVE_BUILD = 22;
     private static final File LOG_FILE = new File("/storage/emulated/0/EXPORT/shelf-log.txt");
     private static final long LOG_MAX_BYTES = 512L * 1024;
     private static final float MM = 72f / 25.4f;
@@ -84,6 +89,25 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
      * structurally instead (see verifyWritten).
      */
     private static final long VERIFY_FULL_PARSE_MAX = 10L * 1024 * 1024;
+    /**
+     * Limits on a template image. A page-sized 1-bit PNG is tens of KB and a few megapixels;
+     * these cut off a photo or a poster scan that would be decoded into memory inside the
+     * plugin host and then embedded on every inserted page.
+     */
+    private static final long IMAGE_MAX_BYTES = 12L * 1024 * 1024;
+    private static final long IMAGE_MAX_PIXELS = 40L * 1000 * 1000;
+    /**
+     * "Shrink for e-ink": the screen is about 1400-1900 px wide and renders 16 greys, so a
+     * bigger or colour image carries data the device cannot show while costing a megabyte on
+     * every page inserted. Line art goes to 1-bit (crisper on e-ink as well as smaller),
+     * anything shaded to grey JPEG.
+     */
+    private static final int SHRINK_MAX_PX = 2048;
+    private static final int JPEG_QUALITY = 80;
+    /** The screen shows 16 greys, so finer gradients are stored and never seen. */
+    private static final int SCREEN_GREYS = 16;
+    /** Below this share of mid-grey pixels an image is treated as line art. */
+    private static final float BICHROME_MID_SHARE = 0.12f;
     /** Working copies + new PDF + backup: about three times the PDF must be free. */
     private static final int SPACE_FACTOR = 3;
     private static final long SPACE_MARGIN = 20L * 1024 * 1024;
@@ -161,12 +185,17 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
      */
     @ReactMethod
     public void insertPages(String path, int anchorIndex, String position, int count,
-                            String background, String space, Promise promise) {
+                            String background, String space, String imagePath, double imageScale,
+                            boolean shrinkImage, Promise promise) {
         worker.execute(() -> {
             try {
                 appendLog("native " + NATIVE_BUILD + ": insert " + count + " " + background + " " + position
-                        + " page " + (anchorIndex + 1) + " space=" + space + " file=" + path);
-                WritableMap result = doInsert(path, anchorIndex, position, count, background, space);
+                        + " page " + (anchorIndex + 1) + " space=" + space + " file=" + path
+                        + ("image".equals(background)
+                                ? " image=" + imagePath + " scale=" + imageScale
+                                        + (shrinkImage ? " shrink" : " as-is") : ""));
+                WritableMap result = doInsert(path, anchorIndex, position, count, background, space,
+                        imagePath, imageScale, shrinkImage);
                 appendLog("native: insert done, pages " + result.getInt("originalCount") + " -> "
                         + result.getInt("finalCount"));
                 promise.resolve(result);
@@ -195,6 +224,62 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
      * What the Insert Page screen needs to offer a working-space choice:
      * {sdPresent, sdWritable, sdFreeBytes, internalFreeBytes, pdfOnSd, pdfSizeBytes}.
      */
+    /**
+     * Whether this page carries Shelf's /ShelfInserted stamp — the only pages removePage
+     * will touch. Checked before the PDF is closed, so a page that cannot be removed is
+     * refused without disturbing what the user is reading.
+     */
+    @ReactMethod
+    public void isShelfPage(String path, int pageIndex, Promise promise) {
+        worker.execute(() -> {
+            try {
+                ensurePdfBox();
+                File source = new File(path);
+                if (!source.isFile()) {
+                    throw new PdfEditError("PDF_NOT_FOUND", "The PDF could not be found.");
+                }
+                try (PDDocument doc = load(source, internalDir())) {
+                    PDPageTree pages = doc.getPages();
+                    if (pageIndex < 0 || pageIndex >= pages.getCount()) {
+                        throw new PdfEditError("PDF_BAD_PAGE", "Page " + (pageIndex + 1) + " is not in this PDF.");
+                    }
+                    boolean inserted = pages.get(pageIndex).getCOSObject()
+                            .getBoolean(INSERTED_MARKER, false);
+                    appendLog("native " + NATIVE_BUILD + ": page " + (pageIndex + 1)
+                            + (inserted ? " was added by Shelf" : " is an original page"));
+                    promise.resolve(inserted);
+                }
+            } catch (PdfEditError e) {
+                promise.reject(e.code, e.getMessage());
+            } catch (Throwable t) {
+                appendLog("native: isShelfPage FAILED " + t);
+                promise.reject("PDF_EDIT_FAILED", String.valueOf(t.getMessage()), t);
+            }
+        });
+    }
+
+    /** Removes ONE page Shelf added. Original pages of the document are refused. */
+    @ReactMethod
+    public void removePage(String path, int pageIndex, String space, Promise promise) {
+        worker.execute(() -> {
+            try {
+                appendLog("native " + NATIVE_BUILD + ": remove page " + (pageIndex + 1)
+                        + " space=" + space + " file=" + path);
+                WritableMap result = doRemove(path, pageIndex, space);
+                appendLog("native: remove done, pages " + result.getInt("originalCount") + " -> "
+                        + result.getInt("finalCount"));
+                promise.resolve(result);
+            } catch (PdfEditError e) {
+                appendLog("native: remove refused " + e.code + " " + e.getMessage());
+                promise.reject(e.code, e.getMessage());
+            } catch (Throwable t) {
+                appendLog("native: remove FAILED " + t);
+                Log.e(TAG, "removePage failed", t);
+                promise.reject("PDF_EDIT_FAILED", String.valueOf(t.getMessage()), t);
+            }
+        });
+    }
+
     @ReactMethod
     public void getWorkSpaces(String path, Promise promise) {
         worker.execute(() -> {
@@ -278,11 +363,85 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
 
     // ---------------------------------------------------------------------------------------
 
+    /**
+     * Takes out one page Shelf added, in place, keeping a backup for undo. The /ShelfInserted
+     * stamp is the gate: a page of the user's own document can never be removed here, however
+     * it is asked for. Handwriting is moved by the JS side before this runs.
+     */
+    private WritableMap doRemove(String path, int pageIndex, String space) throws Exception {
+        File source = new File(path);
+        if (!source.isFile()) {
+            throw new PdfEditError("PDF_NOT_FOUND", "The PDF could not be found.");
+        }
+        ensurePdfBox();
+        File workDir = resolveWorkDir(space, path);
+        long sourceSize = source.length();
+        long sourceModified = source.lastModified();
+        appendLog("native: working in " + workDir + " (free " + workDir.getUsableSpace() / (1024 * 1024)
+                + "MB), pdf " + sourceSize / 1024 + "KB");
+        if (sourceSize > MAX_PDF_BYTES) {
+            throw new PdfEditError("PDF_TOO_LARGE", "This PDF is " + sourceSize / (1024 * 1024)
+                    + " MB. Shelf doesn't change PDFs over " + MAX_PDF_BYTES / (1024 * 1024) + " MB.");
+        }
+        ensureSpace(workDir, sourceSize);
+        File built = new File(workDir, "remove-" + System.currentTimeMillis() + ".pdf");
+
+        int originalCount;
+        try (PDDocument doc = load(source, workDir)) {
+            if (doc.isEncrypted()) {
+                throw new PdfEditError("PDF_LOCKED", "This PDF is locked and can't be changed.");
+            }
+            PDPageTree pages = doc.getPages();
+            originalCount = pages.getCount();
+            if (pageIndex < 0 || pageIndex >= originalCount) {
+                throw new PdfEditError("PDF_BAD_PAGE", "Page " + (pageIndex + 1) + " is not in this PDF.");
+            }
+            if (originalCount <= 1) {
+                throw new PdfEditError("PDF_LAST_PAGE", "A PDF has to keep at least one page.");
+            }
+            if (!pages.get(pageIndex).getCOSObject().getBoolean(INSERTED_MARKER, false)) {
+                throw new PdfEditError("PDF_NOT_INSERTED", "Page " + (pageIndex + 1)
+                        + " is part of the original PDF, so Shelf won't remove it. Only pages Shelf added can be removed.");
+            }
+            pages.remove(pageIndex);
+            doc.save(built);
+        }
+        appendLog("native: saved new PDF " + built.length() / 1024 + "KB");
+
+        verifyWritten(built, workDir, originalCount - 1);
+        if (source.length() != sourceSize || source.lastModified() != sourceModified) {
+            deleteQuietly(built);
+            throw new PdfEditError("PDF_CHANGED", "The PDF changed while the page was being removed. Try again.");
+        }
+
+        File backup = backupFile(workDir, path);
+        copy(source, backup);
+        try {
+            writeOver(built, source, backup);
+        } finally {
+            deleteQuietly(built);
+        }
+
+        WritableMap result = Arguments.createMap();
+        result.putString("path", path);
+        result.putString("action", "remove");
+        result.putInt("originalCount", originalCount);
+        result.putInt("finalCount", originalCount - 1);
+        result.putInt("firstInsertedIndex", pageIndex);
+        result.putInt("count", 1);
+        writeMeta(workDir, path, "remove", originalCount, pageIndex, 1, source.length());
+        dropOtherBackups(workDir, path);
+        pruneBackups(workDir);
+        return result;
+    }
+
     private WritableMap doInsert(String path, int anchorIndex, String position, int count,
-                                 String background, String space) throws Exception {
+                                 String background, String space, String imagePath,
+                                 double imageScale, boolean shrinkImage) throws Exception {
         if (count < 1 || count > MAX_PAGES) {
             throw new PdfEditError("PDF_BAD_COUNT", "Insert between 1 and " + MAX_PAGES + " pages.");
         }
+        File template = "image".equals(background) ? checkTemplate(imagePath) : null;
         boolean before = "before".equals(position);
         File source = new File(path);
         if (!source.isFile()) {
@@ -317,10 +476,13 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
             firstInserted = before ? anchorIndex : anchorIndex + 1;
 
             // Insert one after another so the new pages keep their order.
+            // One image object for the document, drawn on each new page: embedding it per
+            // page would multiply the file size by the number of pages inserted.
+            PDImageXObject image = template == null ? null : loadTemplate(doc, template, shrinkImage);
             PDPage previous = null;
             for (int i = 0; i < count; i++) {
-                PDPage page = newPageLike(anchor);
-                drawBackground(doc, page, background);
+                PDPage page = newPageLike(anchor, image != null);
+                drawBackground(doc, page, background, image, imageScale);
                 if (previous != null) {
                     pages.insertAfter(page, previous);
                 } else if (before) {
@@ -353,11 +515,12 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
 
         WritableMap result = Arguments.createMap();
         result.putString("path", path);
+        result.putString("action", "insert");
         result.putInt("originalCount", originalCount);
         result.putInt("finalCount", originalCount + count);
         result.putInt("firstInsertedIndex", firstInserted);
         result.putInt("count", count);
-        writeMeta(workDir, path, originalCount, firstInserted, count, source.length());
+        writeMeta(workDir, path, "insert", originalCount, firstInserted, count, source.length());
         dropOtherBackups(workDir, path);
         pruneBackups(workDir);
         return result;
@@ -418,10 +581,44 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     }
 
     /** Same visible size and rotation as the anchor, tagged as inserted by Shelf. */
-    private PDPage newPageLike(PDPage anchor) {
+    /**
+     * Centres the template on the page, keeping its shape. `fill` is the user's Size choice:
+     * 1 fills the page edge to edge, less leaves an even margin all round.
+     */
+    private void drawTemplate(PDDocument doc, PDPage page, PDImageXObject image, double fill)
+            throws IOException {
+        PDRectangle box = page.getMediaBox();
+        float room = (float) Math.min(1.0, Math.max(0.5, fill == 0 ? 1.0 : fill));
+        float scale = room * Math.min(box.getWidth() / image.getWidth(),
+                box.getHeight() / image.getHeight());
+        float width = image.getWidth() * scale;
+        float height = image.getHeight() * scale;
+        try (PDPageContentStream cs = new PDPageContentStream(doc, page)) {
+            cs.drawImage(image, (box.getWidth() - width) / 2f, (box.getHeight() - height) / 2f,
+                    width, height);
+        }
+    }
+
+    /**
+     * A new page the size of the anchor's visible area.
+     *
+     * `upright` builds the page already the right way round (the anchor's displayed
+     * dimensions, no rotation) instead of inheriting its /Rotate. A template image would
+     * otherwise land sideways on a rotated page, and compensating for that in the content
+     * stream is more error-prone than giving the page no rotation to compensate for. The
+     * page still displays at the same size as its neighbours.
+     */
+    private PDPage newPageLike(PDPage anchor, boolean upright) {
         PDRectangle visible = anchor.getCropBox();
-        PDPage page = new PDPage(new PDRectangle(visible.getWidth(), visible.getHeight()));
-        page.setRotation(anchor.getRotation());
+        int rotation = ((anchor.getRotation() % 360) + 360) % 360;
+        boolean sideways = rotation == 90 || rotation == 270;
+        PDPage page;
+        if (upright && sideways) {
+            page = new PDPage(new PDRectangle(visible.getHeight(), visible.getWidth()));
+        } else {
+            page = new PDPage(new PDRectangle(visible.getWidth(), visible.getHeight()));
+            page.setRotation(anchor.getRotation());
+        }
         page.getCOSObject().setBoolean(INSERTED_MARKER, true);
         return page;
     }
@@ -430,7 +627,198 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
      * Light grey rules every 8 mm, drawn so they run HORIZONTALLY as displayed: on a page
      * rotated 90/270 the displayed horizontal is the page's vertical axis.
      */
-    private void drawBackground(PDDocument doc, PDPage page, String background) throws IOException {
+    /**
+     * A template image must exist, be a kind PDFBox can read, and be small enough to decode
+     * inside the plugin host. Refusing here gives the user a sentence; failing inside PDFBox
+     * gives them a stack trace.
+     */
+    private File checkTemplate(String imagePath) throws PdfEditError {
+        if (imagePath == null || imagePath.trim().isEmpty()) {
+            throw new PdfEditError("PDF_NO_IMAGE", "Choose a template image first.");
+        }
+        File file = new File(imagePath);
+        if (!file.isFile()) {
+            throw new PdfEditError("PDF_IMAGE_NOT_FOUND", "That template image could not be found.");
+        }
+        String lower = file.getName().toLowerCase();
+        if (!lower.endsWith(".png") && !lower.endsWith(".jpg") && !lower.endsWith(".jpeg")) {
+            throw new PdfEditError("PDF_BAD_IMAGE", "The template must be a PNG or JPEG.");
+        }
+        if (file.length() > IMAGE_MAX_BYTES) {
+            throw new PdfEditError("PDF_IMAGE_TOO_BIG", "That image is " + file.length() / (1024 * 1024)
+                    + " MB. Use one under " + IMAGE_MAX_BYTES / (1024 * 1024) + " MB.");
+        }
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new PdfEditError("PDF_BAD_IMAGE", "That image could not be read. Try a PNG.");
+        }
+        if ((long) bounds.outWidth * bounds.outHeight > IMAGE_MAX_PIXELS) {
+            throw new PdfEditError("PDF_IMAGE_TOO_BIG", "That image is " + bounds.outWidth + " by "
+                    + bounds.outHeight + " pixels. Scale it closer to the screen's size.");
+        }
+        return file;
+    }
+
+    /**
+     * Turns the chosen file into something to draw on the page. With `shrink` the image is
+     * scaled to what the screen can show and re-encoded for size; every conversion falls
+     * back to embedding the file as it is, because a bigger page beats a failed insert.
+     */
+    private PDImageXObject loadTemplate(PDDocument doc, File file, boolean shrink) throws PdfEditError {
+        if (!shrink) {
+            return loadOriginal(doc, file);
+        }
+        Bitmap source = decodeScaled(file);
+        if (source == null) {
+            appendLog("native: template could not be decoded for shrinking; embedding as-is");
+            return loadOriginal(doc, file);
+        }
+        try {
+            boolean lineArt = isLineArt(source);
+            appendLog("native: template " + source.getWidth() + "x" + source.getHeight()
+                    + (lineArt ? " as 1-bit" : " as grey JPEG"));
+            if (lineArt) {
+                Bitmap bw = toBlackAndWhite(source);
+                try {
+                    PDImageXObject image = CCITTFactory.createFromImage(doc, bw);
+                    appendLog("native: template stored as "
+                            + image.getCOSObject().getLength() / 1024 + "KB of 1-bit");
+                    return image;
+                } catch (Throwable t) {
+                    appendLog("native: 1-bit embed failed, trying grey " + t);
+                } finally {
+                    bw.recycle();
+                }
+            }
+            Bitmap grey = toScreenGrey(source);
+            try {
+                java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream();
+                grey.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpeg);
+                PDImageXObject image = JPEGFactory.createFromByteArray(doc, jpeg.toByteArray());
+                appendLog("native: template stored as " + jpeg.size() / 1024 + "KB of grey JPEG");
+                return image;
+            } catch (Throwable t) {
+                appendLog("native: grey embed failed, embedding as-is " + t);
+            } finally {
+                grey.recycle();
+            }
+        } finally {
+            source.recycle();
+        }
+        return loadOriginal(doc, file);
+    }
+
+    private PDImageXObject loadOriginal(PDDocument doc, File file) throws PdfEditError {
+        try {
+            return PDImageXObject.createFromFileByExtension(file, doc);
+        } catch (Throwable t) {
+            appendLog("native: template image failed " + t);
+            throw new PdfEditError("PDF_BAD_IMAGE", "That image could not be used as a page. Try a PNG.");
+        }
+    }
+
+    /** Decodes at the smallest power-of-two scale that still covers what the screen shows. */
+    private Bitmap decodeScaled(File file) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            int longest = Math.max(bounds.outWidth, bounds.outHeight);
+            int sample = 1;
+            while (longest / (sample * 2) >= SHRINK_MAX_PX) {
+                sample *= 2;
+            }
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = sample;
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+        } catch (Throwable t) {
+            appendLog("native: decode for shrinking failed " + t);
+            return null;
+        }
+    }
+
+    /**
+     * True when almost every pixel is near black or near white — a diagram, a scan of a
+     * drawing, a ruled or boxed template. Sampled every fourth pixel, a band at a time, so a
+     * page-sized image never costs more than a few MB of heap here.
+     */
+    private static boolean isLineArt(Bitmap image) {
+        int width = image.getWidth();
+        int band = Math.max(1, 262144 / Math.max(1, width));
+        int[] row = new int[width * band];
+        long sampled = 0;
+        long mid = 0;
+        for (int top = 0; top < image.getHeight(); top += band) {
+            int rows = Math.min(band, image.getHeight() - top);
+            image.getPixels(row, 0, width, 0, top, width, rows);
+            for (int i = 0; i < width * rows; i += 4) {
+                int pixel = row[i];
+                int grey = ((pixel >> 16 & 0xFF) * 77 + (pixel >> 8 & 0xFF) * 151
+                        + (pixel & 0xFF) * 28) >> 8;
+                sampled++;
+                if (grey > 48 && grey < 208) {
+                    mid++;
+                }
+            }
+        }
+        return sampled > 0 && (float) mid / sampled < BICHROME_MID_SHARE;
+    }
+
+    private static Bitmap toBlackAndWhite(Bitmap image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        Bitmap out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        int band = Math.max(1, 262144 / Math.max(1, width));
+        int[] row = new int[width * band];
+        for (int top = 0; top < height; top += band) {
+            int rows = Math.min(band, height - top);
+            image.getPixels(row, 0, width, 0, top, width, rows);
+            for (int i = 0; i < width * rows; i++) {
+                int pixel = row[i];
+                int grey = ((pixel >> 16 & 0xFF) * 77 + (pixel >> 8 & 0xFF) * 151
+                        + (pixel & 0xFF) * 28) >> 8;
+                row[i] = grey < 160 ? 0xFF000000 : 0xFFFFFFFF;
+            }
+            out.setPixels(row, 0, width, 0, top, width, rows);
+        }
+        return out;
+    }
+
+    /**
+     * Grey, flattened to the 16 levels the screen can show. Quantising costs nothing visible
+     * on this device and gives the encoder far fewer distinct values to carry.
+     */
+    private static Bitmap toScreenGrey(Bitmap image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        Bitmap out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        int band = Math.max(1, 262144 / Math.max(1, width));
+        int[] row = new int[width * band];
+        int step = 255 / (SCREEN_GREYS - 1);
+        for (int top = 0; top < height; top += band) {
+            int rows = Math.min(band, height - top);
+            image.getPixels(row, 0, width, 0, top, width, rows);
+            for (int i = 0; i < width * rows; i++) {
+                int pixel = row[i];
+                int grey = ((pixel >> 16 & 0xFF) * 77 + (pixel >> 8 & 0xFF) * 151
+                        + (pixel & 0xFF) * 28) >> 8;
+                int level = Math.round(grey / (float) step) * step;
+                row[i] = 0xFF000000 | level << 16 | level << 8 | level;
+            }
+            out.setPixels(row, 0, width, 0, top, width, rows);
+        }
+        return out;
+    }
+
+    private void drawBackground(PDDocument doc, PDPage page, String background, PDImageXObject image,
+                                double imageScale) throws IOException {
+        if (image != null) {
+            drawTemplate(doc, page, image, imageScale);
+            return;
+        }
         if (!"lined".equals(background)) {
             return;
         }
@@ -690,10 +1078,11 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         return sb.toString();
     }
 
-    private void writeMeta(File dir, String path, int originalCount, int firstInserted, int count,
-                           long finalSize) throws Exception {
+    private void writeMeta(File dir, String path, String action, int originalCount, int firstInserted,
+                           int count, long finalSize) throws Exception {
         JSONObject json = new JSONObject();
         json.put("path", path);
+        json.put("action", action);
         json.put("originalCount", originalCount);
         json.put("firstInsertedIndex", firstInserted);
         json.put("count", count);
@@ -717,6 +1106,8 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
         JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
         WritableMap map = Arguments.createMap();
         map.putString("path", json.getString("path"));
+        // Older records predate removal and are always inserts.
+        map.putString("action", json.optString("action", "insert"));
         map.putInt("originalCount", json.getInt("originalCount"));
         map.putInt("firstInsertedIndex", json.getInt("firstInsertedIndex"));
         map.putInt("count", json.getInt("count"));

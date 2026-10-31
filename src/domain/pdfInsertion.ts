@@ -5,7 +5,52 @@
 export const MAX_INSERT_PAGES = 20;
 
 export type InsertPosition = 'before' | 'after';
-export type InsertBackground = 'blank' | 'lined';
+export type InsertBackground = 'blank' | 'lined' | 'image';
+
+/** How many recently used template images Shelf offers on the Insert Page screen. */
+export const MAX_TEMPLATES = 5;
+
+/** How much of the page a template image fills. */
+export type TemplateSize = 'full' | 'margin' | 'small';
+
+const TEMPLATE_SCALES: Record<TemplateSize, number> = {
+  full: 1,
+  margin: 0.94,
+  small: 0.86,
+};
+
+export const TEMPLATE_SIZES = Object.keys(TEMPLATE_SCALES) as TemplateSize[];
+
+export function templateScale(size: TemplateSize): number {
+  return TEMPLATE_SCALES[size] ?? TEMPLATE_SCALES.margin;
+}
+
+export function parseTemplateSize(value: unknown): TemplateSize | undefined {
+  return value === 'full' || value === 'margin' || value === 'small' ? value : undefined;
+}
+
+/** Label for the size control: the plain name plus what it actually does. */
+export function templateSizeLabel(size: TemplateSize): string {
+  const percent = Math.round(templateScale(size) * 100);
+  const name = size === 'full' ? 'Full' : size === 'margin' ? 'Margin' : 'Small';
+  return size === 'full' ? name : `${name} (${percent}%)`;
+}
+
+const IMAGE_SUFFIXES = ['.png', '.jpg', '.jpeg'];
+
+/** What the device picker may hand back and PDFBox can draw. */
+export function isImageFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  return IMAGE_SUFFIXES.some(suffix => lower.endsWith(suffix));
+}
+
+/** Newest first, no duplicates, capped — the recent-template list. */
+export function rememberTemplate(recents: string[], path: string): string[] {
+  if (!path) {
+    return recents.slice(0, MAX_TEMPLATES);
+  }
+  return [path, ...recents.filter(entry => entry !== path)].slice(0, MAX_TEMPLATES);
+}
 
 export function clampInsertCount(count: number): number {
   if (!Number.isFinite(count)) {

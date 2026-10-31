@@ -1,3 +1,4 @@
+import {describe, expect, it} from '@jest/globals';
 import {
   PDF_MAX_BYTES,
   PDF_WARN_BYTES,
@@ -5,7 +6,7 @@ import {
   formatFileSize,
   pdfSizeLevel,
   pdfTooLargeMessage,
-} from '../pdfSize';
+} from '../src/domain/pdfSize';
 
 const MB = 1024 * 1024;
 

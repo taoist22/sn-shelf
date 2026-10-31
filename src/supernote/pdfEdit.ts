@@ -23,6 +23,7 @@ export type PdfWorkSpaces = {
 
 export type PdfInsertResult = {
   path: string;
+  action?: 'insert' | 'remove';
   originalCount: number;
   finalCount: number;
   firstInsertedIndex: number;
@@ -31,6 +32,8 @@ export type PdfInsertResult = {
 
 export type PdfUndoRecord = {
   path: string;
+  /** Which change the backup reverses; older records are always inserts. */
+  action?: 'insert' | 'remove';
   originalCount: number;
   firstInsertedIndex: number;
   count: number;
@@ -47,8 +50,13 @@ type ShelfPdfEditBridge = {
     count: number,
     background: InsertBackground,
     space: PdfWorkSpace,
+    imagePath: string,
+    imageScale: number,
+    shrinkImage: boolean,
   ): Promise<PdfInsertResult>;
   getWorkSpaces(path: string): Promise<PdfWorkSpaces>;
+  isShelfPage(path: string, pageIndex: number): Promise<boolean>;
+  removePage(path: string, pageIndex: number, space: PdfWorkSpace): Promise<PdfInsertResult>;
   fileSize(path: string): Promise<number>;
   delay(ms: number): Promise<null>;
   getUndo(path: string): Promise<PdfUndoRecord | null>;
@@ -73,8 +81,24 @@ export function insertPdfPages(
   count: number,
   background: InsertBackground,
   space: PdfWorkSpace,
+  /** The template image, for background 'image'; ignored otherwise. */
+  imagePath = '',
+  /** How much of the page the template fills, 0.5–1. */
+  imageScale = 1,
+  /** Re-encode the template for the e-ink screen instead of embedding it as it is. */
+  shrinkImage = true,
 ): Promise<PdfInsertResult> {
-  return requireBridge().insertPages(path, anchorIndex, position, count, background, space);
+  return requireBridge().insertPages(
+    path,
+    anchorIndex,
+    position,
+    count,
+    background,
+    space,
+    imagePath,
+    imageScale,
+    shrinkImage,
+  );
 }
 
 /** Bytes on disk, or 0 when the size can't be read (an older native package, a gone file). */
@@ -88,6 +112,31 @@ export async function getFileSize(path: string): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Whether Shelf added this page, from the /ShelfInserted stamp in the PDF itself.
+ * Asked before the PDF is closed so an original page is refused without disruption.
+ */
+export function isShelfInsertedPage(path: string, pageIndex: number): Promise<boolean> {
+  const bridge = requireBridge();
+  if (!bridge.isShelfPage) {
+    throw new Error('Installed native package cannot check pages. Rebuild and reinstall the plugin.');
+  }
+  return bridge.isShelfPage(path, pageIndex);
+}
+
+/** Removes one page Shelf added; original pages of the document are refused natively. */
+export function removePdfPage(
+  path: string,
+  pageIndex: number,
+  space: PdfWorkSpace,
+): Promise<PdfInsertResult> {
+  const bridge = requireBridge();
+  if (!bridge.removePage) {
+    throw new Error('Installed native package cannot remove pages. Rebuild and reinstall the plugin.');
+  }
+  return bridge.removePage(path, pageIndex, space);
 }
 
 export async function getPdfWorkSpaces(path: string): Promise<PdfWorkSpaces | null> {

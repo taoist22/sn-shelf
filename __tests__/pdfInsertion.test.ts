@@ -1,7 +1,14 @@
 import {describe, expect, it} from '@jest/globals';
 import {
   MAX_INSERT_PAGES,
+  MAX_TEMPLATES,
   clampInsertCount,
+  isImageFile,
+  parseTemplateSize,
+  rememberTemplate,
+  TEMPLATE_SIZES,
+  templateScale,
+  templateSizeLabel,
   firstInsertedIndex,
   pageAfterInsert,
   pageAfterUndo,
@@ -100,5 +107,77 @@ describe('moving handwriting with its pages', () => {
     apply(sidecar, done);
     apply(sidecar, rollbackMoves(done));
     expect([...sidecar.entries()].sort()).toEqual([[1, 'b'], [2, 'c'], [3, 'd']]);
+  });
+});
+
+describe('template images', () => {
+  it('accepts only images PDFBox can draw', () => {
+    expect(isImageFile('/MyStyle/Cornell.png')).toBe(true);
+    expect(isImageFile('/MyStyle/Scan.JPG')).toBe(true);
+    expect(isImageFile('/MyStyle/grid.svg')).toBe(false);
+    expect(isImageFile('/Document/Book.pdf')).toBe(false);
+  });
+
+  it('keeps the newest first, without duplicates, capped', () => {
+    let recents: string[] = [];
+    for (const name of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      recents = rememberTemplate(recents, `/MyStyle/${name}.png`);
+    }
+    expect(recents).toEqual([
+      '/MyStyle/f.png',
+      '/MyStyle/e.png',
+      '/MyStyle/d.png',
+      '/MyStyle/c.png',
+      '/MyStyle/b.png',
+    ]);
+    expect(rememberTemplate(recents, '/MyStyle/c.png')[0]).toBe('/MyStyle/c.png');
+    expect(rememberTemplate(recents, '/MyStyle/c.png')).toHaveLength(MAX_TEMPLATES);
+  });
+
+  it('leaves the list alone when nothing was chosen', () => {
+    expect(rememberTemplate(['/MyStyle/a.png'], '')).toEqual(['/MyStyle/a.png']);
+  });
+});
+
+describe('template size', () => {
+  it('fills the page only at Full', () => {
+    expect(templateScale('full')).toBe(1);
+    expect(templateScale('margin')).toBeLessThan(1);
+    expect(templateScale('small')).toBeLessThan(templateScale('margin'));
+    expect(templateScale('small')).toBeGreaterThan(0.5);
+  });
+
+  it('offers all three sizes, labelled with what they do', () => {
+    expect(TEMPLATE_SIZES).toEqual(['full', 'margin', 'small']);
+    expect(templateSizeLabel('full')).toBe('Full');
+    expect(templateSizeLabel('margin')).toBe('Margin (94%)');
+  });
+
+  it('ignores a stored size it does not recognise', () => {
+    expect(parseTemplateSize('margin')).toBe('margin');
+    expect(parseTemplateSize('enormous')).toBeUndefined();
+    expect(parseTemplateSize(undefined)).toBeUndefined();
+  });
+});
+
+describe('removing a page Shelf added', () => {
+  // Removal reuses the undo planner (clear the page, move later pages down), and
+  // putting the page back reuses the insert planner (move them up again).
+  it('clears the removed page and moves later handwriting down', () => {
+    const plan = planUndoMoves([2, 5, 7], 5, 1);
+    expect(plan.clear).toEqual([5]);
+    expect(plan.moves).toEqual([
+      {from: 7, to: 6},
+    ]);
+  });
+
+  it('moves handwriting back up when the page is restored', () => {
+    expect(planInsertMoves([2, 6], 5, 1)).toEqual([{from: 6, to: 7}]);
+  });
+
+  it('leaves pages before the removed one alone', () => {
+    const plan = planUndoMoves([0, 1], 5, 1);
+    expect(plan.clear).toEqual([]);
+    expect(plan.moves).toEqual([]);
   });
 });
