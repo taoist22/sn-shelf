@@ -1,6 +1,6 @@
 {
   "name": "SNShelf",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Curated shelf for quickly jumping between active Supernote notes and reference pages.",
   "private": true,
   "scripts": {

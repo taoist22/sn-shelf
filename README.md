@@ -242,6 +242,32 @@ change, because its text was never what made it big.
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
 
+## Changes in 0.2.8
+
+- **Insert a page from your own PNG or JPEG.** Background now offers
+  **Image…**: pick a template from the device, at a **Size** of Full, Margin
+  (94%) or Small (86%). Shelf remembers the last five templates and your size
+  choice. You write on the page as you would any PDF page, and the eraser
+  only touches your writing — the image is part of the page.
+- **Shrink for e-ink** (on by default) re-encodes a template for the screen:
+  grayscale, flattened to the 16 greys the device shows, line art as 1-bit.
+  A diagram that cost 1197 KB embedded as-is costs about 248 KB this way.
+  **Embed as-is** keeps the file exactly as it is.
+- **Remove Page N** takes out a page Shelf added. Pages Shelf inserts are
+  stamped inside the PDF, and a page without that stamp is refused — your own
+  pages cannot be removed however you ask. Handwriting on later pages moves
+  back down, and Undo puts the page back (though not writing that was on it).
+- **Fixed: choosing Image… jumped straight to the file picker**, so the
+  template controls never appeared. Picking the mode and picking the file are
+  now separate taps.
+- **Fixed: a tap meant for the file picker could start an insert**, because
+  the plugin panel can sit above the picker. Insert now ignores a tap for a
+  moment after the picker closes.
+- **Fixed: the diagnostic log began mid-operation**, losing everything before
+  Insert Page asked for file permission.
+- **Both halves of the plugin show a build number** on the Insert Page screen
+  and in the log, so a stale install is obvious at a glance.
+
 ## Changes in 0.2.7
 
 - **PDFs over 25 MB are refused**, with a warning from 10 MB. A 38.5 MB,
