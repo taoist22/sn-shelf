@@ -2,7 +2,9 @@ import {NativeModules} from 'react-native';
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
 import {isQuoteInk} from '../domain/quoteInk';
 import {
+  clampInsertCount,
   isImageFile,
+  type InsertPosition,
   MAX_TEMPLATES,
   parseTemplateSize,
   type TemplateSize,
@@ -33,6 +35,15 @@ export type PersistedShelfState = {
   pdfTemplateSize?: TemplateSize;
   /** Re-encode template images for e-ink; absent = on. */
   pdfTemplateShrink?: boolean;
+  /** Last rule/grid/dot spacing in mm; absent = 8. */
+  pdfTemplateSpacing?: number;
+  /** Last Insert Page position and count, so the next insert repeats the last one. */
+  pdfInsertPosition?: InsertPosition;
+  pdfInsertCount?: number;
+  /** Shelf's floating button: off unless the user turns it on. */
+  overlayEnabled?: boolean;
+  /** Whether a plain tap inserts straight away instead of opening the menu. */
+  overlayTapInserts?: boolean;
 };
 
 export type PdfWorkSpace = 'same' | 'sd' | 'internal';
@@ -196,6 +207,11 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
     pdfTemplates?: unknown;
     pdfTemplateSize?: unknown;
     pdfTemplateShrink?: unknown;
+    pdfTemplateSpacing?: unknown;
+    pdfInsertPosition?: unknown;
+    pdfInsertCount?: unknown;
+    overlayEnabled?: unknown;
+    overlayTapInserts?: unknown;
     items?: unknown;
     returnTarget?: unknown;
   };
@@ -225,6 +241,19 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
       pdfTemplateSize: parseTemplateSize(value.pdfTemplateSize),
       pdfTemplateShrink:
         typeof value.pdfTemplateShrink === 'boolean' ? value.pdfTemplateShrink : undefined,
+      pdfTemplateSpacing:
+        typeof value.pdfTemplateSpacing === 'number' && value.pdfTemplateSpacing > 0
+          ? value.pdfTemplateSpacing
+          : undefined,
+      pdfInsertPosition:
+        value.pdfInsertPosition === 'before' || value.pdfInsertPosition === 'after'
+          ? value.pdfInsertPosition
+          : undefined,
+      pdfInsertCount:
+        typeof value.pdfInsertCount === 'number' ? clampInsertCount(value.pdfInsertCount) : undefined,
+      overlayEnabled: typeof value.overlayEnabled === 'boolean' ? value.overlayEnabled : undefined,
+      overlayTapInserts:
+        typeof value.overlayTapInserts === 'boolean' ? value.overlayTapInserts : undefined,
     };
   }
 

@@ -1,6 +1,7 @@
 package com.snshelf;
 
 import android.graphics.Bitmap;
+import android.util.DisplayMetrics;
 import android.graphics.BitmapFactory;
 import android.os.Environment;
 import android.util.Log;
@@ -66,13 +67,22 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     private static final String TAG = "ShelfPdfEdit";
     private static final COSName INSERTED_MARKER = COSName.getPDFName("ShelfInserted");
     private static final int MAX_PAGES = 20;
-    /** Bumped with each native change; shown on screen and in the log to spot stale installs. */
-    static final int NATIVE_BUILD = 22;
+    /**
+     * Stamped by buildPlugin.sh at every build (date, time and git hash), shown on screen
+     * and written to the log. The JS half carries the SAME string, so two different values
+     * mean a half-installed package — which is exactly the confusion a hand-kept number
+     * caused (2026-10-30).
+     */
+    static final String BUILD_ID = "2026-11-02 16:15 2a20dca";
     private static final File LOG_FILE = new File("/storage/emulated/0/EXPORT/shelf-log.txt");
     private static final long LOG_MAX_BYTES = 512L * 1024;
     private static final float MM = 72f / 25.4f;
-    private static final float RULE_SPACING = 8f * MM;   // Supernote's standard 8 mm ruling
     private static final float RULE_MARGIN = 10f * MM;
+    /** A dot's diameter on a dotted template, before the apparent-size correction. */
+    private static final float DOT_SIZE = 0.5f * MM;
+    /** Guard rails for the page-to-screen correction, in case the metrics are odd. */
+    private static final float MIN_FIT = 0.2f;
+    private static final float MAX_FIT = 3f;
     private static final long BACKUP_MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000;
     private static final int BACKUP_MAX_COUNT = 5;
     /** Undo backups are full copies; cap what they may use on each storage. */
@@ -186,16 +196,16 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void insertPages(String path, int anchorIndex, String position, int count,
                             String background, String space, String imagePath, double imageScale,
-                            boolean shrinkImage, Promise promise) {
+                            boolean shrinkImage, double spacingMm, Promise promise) {
         worker.execute(() -> {
             try {
-                appendLog("native " + NATIVE_BUILD + ": insert " + count + " " + background + " " + position
+                appendLog("native " + BUILD_ID + ": insert " + count + " " + background + " " + position
                         + " page " + (anchorIndex + 1) + " space=" + space + " file=" + path
                         + ("image".equals(background)
                                 ? " image=" + imagePath + " scale=" + imageScale
                                         + (shrinkImage ? " shrink" : " as-is") : ""));
                 WritableMap result = doInsert(path, anchorIndex, position, count, background, space,
-                        imagePath, imageScale, shrinkImage);
+                        imagePath, imageScale, shrinkImage, spacingMm);
                 appendLog("native: insert done, pages " + result.getInt("originalCount") + " -> "
                         + result.getInt("finalCount"));
                 promise.resolve(result);
@@ -245,7 +255,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
                     }
                     boolean inserted = pages.get(pageIndex).getCOSObject()
                             .getBoolean(INSERTED_MARKER, false);
-                    appendLog("native " + NATIVE_BUILD + ": page " + (pageIndex + 1)
+                    appendLog("native " + BUILD_ID + ": page " + (pageIndex + 1)
                             + (inserted ? " was added by Shelf" : " is an original page"));
                     promise.resolve(inserted);
                 }
@@ -263,7 +273,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     public void removePage(String path, int pageIndex, String space, Promise promise) {
         worker.execute(() -> {
             try {
-                appendLog("native " + NATIVE_BUILD + ": remove page " + (pageIndex + 1)
+                appendLog("native " + BUILD_ID + ": remove page " + (pageIndex + 1)
                         + " space=" + space + " file=" + path);
                 WritableMap result = doRemove(path, pageIndex, space);
                 appendLog("native: remove done, pages " + result.getInt("originalCount") + " -> "
@@ -303,7 +313,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
                 map.putString("sdReason", "check failed: " + t);
                 appendLog("native: workspaces check FAILED " + t);
             }
-            map.putInt("nativeBuild", NATIVE_BUILD);
+            map.putString("nativeBuild", BUILD_ID);
             promise.resolve(map);
         });
     }
@@ -437,7 +447,8 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
 
     private WritableMap doInsert(String path, int anchorIndex, String position, int count,
                                  String background, String space, String imagePath,
-                                 double imageScale, boolean shrinkImage) throws Exception {
+                                 double imageScale, boolean shrinkImage,
+                                 double spacingMm) throws Exception {
         if (count < 1 || count > MAX_PAGES) {
             throw new PdfEditError("PDF_BAD_COUNT", "Insert between 1 and " + MAX_PAGES + " pages.");
         }
@@ -482,7 +493,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
             PDPage previous = null;
             for (int i = 0; i < count; i++) {
                 PDPage page = newPageLike(anchor, image != null);
-                drawBackground(doc, page, background, image, imageScale);
+                drawBackground(doc, page, background, image, imageScale, spacingMm);
                 if (previous != null) {
                     pages.insertAfter(page, previous);
                 } else if (before) {
@@ -814,32 +825,94 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
     }
 
     private void drawBackground(PDDocument doc, PDPage page, String background, PDImageXObject image,
-                                double imageScale) throws IOException {
+                                double imageScale, double spacingMm) throws IOException {
         if (image != null) {
             drawTemplate(doc, page, image, imageScale);
             return;
         }
-        if (!"lined".equals(background)) {
+        boolean lined = "lined".equals(background);
+        boolean grid = "grid".equals(background);
+        boolean dots = "dots".equals(background);
+        if (!lined && !grid && !dots) {
             return;
         }
         PDRectangle box = page.getMediaBox();
         int rotation = ((page.getRotation() % 360) + 360) % 360;
         boolean sideways = rotation == 90 || rotation == 270;
+
+        // Drawn to look the asked-for size ON SCREEN, not on the page: the reader shrinks
+        // the whole page to fit, so 8 mm of rules on a Letter page arrived as about 6 and
+        // did not match the device's own 8 mm template (device report, 2026-11-02).
+        float fit = fitScale(page);
+        float millimetre = (float) (spacingMm > 0 ? spacingMm : 8) * MM / fit;
+        float margin = RULE_MARGIN / fit;
+        float width = box.getWidth();
+        float height = box.getHeight();
+        appendLog("native: template " + background + " " + spacingMm + "mm at fit " + fit
+                + " -> " + millimetre + "pt spacing");
+
         try (PDPageContentStream cs = new PDPageContentStream(doc, page)) {
-            cs.setStrokingColor(0.72f, 0.72f, 0.72f);
-            cs.setLineWidth(0.5f);
-            if (!sideways) {
-                for (float y = box.getHeight() - RULE_MARGIN - RULE_SPACING; y > RULE_MARGIN; y -= RULE_SPACING) {
-                    cs.moveTo(RULE_MARGIN, y);
-                    cs.lineTo(box.getWidth() - RULE_MARGIN, y);
+            if (dots) {
+                cs.setStrokingColor(0.55f, 0.55f, 0.55f);
+                cs.setLineWidth(DOT_SIZE / fit);
+                cs.setLineCapStyle(1); // round: a near-zero line paints a dot
+                for (float y = height - margin; y > margin; y -= millimetre) {
+                    for (float x = margin; x < width - margin; x += millimetre) {
+                        cs.moveTo(x, y);
+                        cs.lineTo(x + 0.01f, y);
+                    }
                 }
-            } else {
-                for (float x = RULE_MARGIN + RULE_SPACING; x < box.getWidth() - RULE_MARGIN; x += RULE_SPACING) {
-                    cs.moveTo(x, RULE_MARGIN);
-                    cs.lineTo(x, box.getHeight() - RULE_MARGIN);
+                cs.stroke();
+                return;
+            }
+            cs.setStrokingColor(0.72f, 0.72f, 0.72f);
+            cs.setLineWidth(0.5f / fit);
+            if (grid || !sideways) {
+                for (float y = height - margin - millimetre; y > margin; y -= millimetre) {
+                    cs.moveTo(margin, y);
+                    cs.lineTo(width - margin, y);
+                }
+            }
+            if (grid || sideways) {
+                for (float x = margin + millimetre; x < width - margin; x += millimetre) {
+                    cs.moveTo(x, margin);
+                    cs.lineTo(x, height - margin);
                 }
             }
             cs.stroke();
+        }
+    }
+
+    /**
+     * How much the reader shrinks this page to fit the screen: 1 when the page is the size
+     * of the screen, about 0.75 for a Letter page on a Manta. Anything drawn on the page is
+     * scaled by this, so apparent sizes have to be divided by it.
+     *
+     * The screen's real size comes from the display metrics (these devices report 300 dpi),
+     * so no device list is hardcoded. Odd metrics fall back to 1, i.e. page units.
+     */
+    private float fitScale(PDPage page) {
+        try {
+            DisplayMetrics metrics = reactContext.getResources().getDisplayMetrics();
+            float dpi = metrics.densityDpi > 0 ? metrics.densityDpi : 0;
+            if (dpi <= 0 || metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
+                return 1f;
+            }
+            float screenWmm = metrics.widthPixels / dpi * 25.4f;
+            float screenHmm = metrics.heightPixels / dpi * 25.4f;
+            PDRectangle box = page.getMediaBox();
+            int rotation = ((page.getRotation() % 360) + 360) % 360;
+            boolean sideways = rotation == 90 || rotation == 270;
+            float pageWmm = (sideways ? box.getHeight() : box.getWidth()) / MM;
+            float pageHmm = (sideways ? box.getWidth() : box.getHeight()) / MM;
+            if (pageWmm <= 0 || pageHmm <= 0) {
+                return 1f;
+            }
+            float fit = Math.min(screenWmm / pageWmm, screenHmm / pageHmm);
+            return Math.max(MIN_FIT, Math.min(MAX_FIT, fit));
+        } catch (Throwable t) {
+            appendLog("native: screen size unavailable, drawing in page units " + t);
+            return 1f;
         }
     }
 

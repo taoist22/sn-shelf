@@ -120,8 +120,8 @@ Pins land on the shelf you are looking at:
 While reading a PDF, open Shelf and tap **Insert Page…** (PDFs only).
 
 1. Choose **Before** or **After** the page you are on, how many pages
-   (1–20), and a background: **Blank**, **Lined** (8 mm, the same spacing as
-   Supernote's ruled template), or **Image…** — a PNG or JPEG from the
+   (1–20), and a background: **Blank**, **Lined** (6, 8 or 10 mm), **Grid**
+   or **Dots** (5 or 10 mm), or **Image…** — a PNG or JPEG from the
    device, centred on the page at a **Size** you choose — Full (edge to
    edge), Margin (94%) or Small (86%). Shelf remembers the last five
    templates you used and your size choice, so a template you reach for
@@ -136,25 +136,40 @@ While reading a PDF, open Shelf and tap **Insert Page…** (PDFs only).
    (about 1404 × 1872 for a Nomad, 1920 × 2560 for a Manta) — a page-sized
    1-bit PNG costs tens of kilobytes, while a photo costs megabytes on every
    page inserted. Images over 12 MB or 40 megapixels are refused.
-2. Tap **Insert**. Shelf briefly steps out of the PDF into a note (your
-   project's working note, or the last note Shelf saw), adds the pages,
-   moves your handwriting, and reopens the PDF on the first new page. A
-   progress screen shows each step.
-3. **Your handwriting stays with its pages.** The Supernote stores PDF
+
+   Rule, grid and dot spacing is measured **as it looks on the device**, not
+   on the page. The reader shrinks a page to fit the screen — a US Letter page
+   displays at about 75% on a Manta — so rules drawn 8 mm apart on the page
+   arrive as 6 mm and look tighter than Supernote's own 8 mm template. Shelf
+   divides by that fit, drawing them about 10.6 mm apart on a Letter page so
+   they measure 8 mm on glass. One consequence: print such a PDF and the rules
+   measure the on-page figure, not the on-screen one.
+2. Tap **Insert**. When there is handwriting after the insert point, Shelf
+   briefly steps out of the PDF into a note (your project's working note, or
+   the last note Shelf saw), because PDF handwriting can only be moved while
+   the PDF is closed. **When there is nothing to move — the usual case when
+   you add a page as you read forward — Shelf stays in the PDF**, rewrites it
+   and reloads. If the reader keeps its old page count, Shelf steps out and
+   back to force the reload. A progress screen shows each step.
+3. **Coming back is quicker.** Your position, count, template, spacing and
+   size are remembered, and reopening Shelf while reading a PDF whose pages
+   you were just working on goes straight to Insert Page — so a second page
+   is two taps. Cancel on that screen stops it doing so.
+4. **Your handwriting stays with its pages.** The Supernote stores PDF
    handwriting by page number, so inserting pages would normally leave
    everything after the insert point on the wrong pages. Shelf moves each
    later page's handwriting to its new page number.
-4. **Remove Page N…** (on the same screen) takes out the page you are on, but
+5. **Remove Page N…** (on the same screen) takes out the page you are on, but
    **only if Shelf added it** — every page Shelf inserts is stamped inside the
    PDF, and a page without that stamp is refused, so your own pages are safe
    whatever you tap. Shelf asks first, and says so when you wrote on that
    page: the writing goes with the page, and putting the page back does not
    bring the writing back. Handwriting on later pages moves back down.
-5. **Undo Last Insert** (on the same screen) removes the added pages and
+6. **Undo Last Insert** (on the same screen) removes the added pages and
    moves the handwriting back. If you wrote on the added pages, Shelf asks
    first — that writing goes with them. Undo is refused if the PDF has
    changed since.
-6. If anything fails part-way, Shelf puts the PDF and the handwriting back
+7. If anything fails part-way, Shelf puts the PDF and the handwriting back
    as they were and says so.
 
 Inserting a page rewrites the whole PDF, so the file can grow by a few
@@ -191,6 +206,32 @@ no cloud account, no companion app:
    onto the current page of **any** note — no source link, since the source
    isn't on the device. A `-YYYY-MM-DD-HHMMSS` filename suffix becomes the
    shown capture date.
+
+### The floating button (optional)
+
+Insert Page has a **FLOATING BUTTON** switch. Turned on, Shelf puts a small
+round button over whatever you are reading:
+
+- **Long-press it with a finger** for a menu that says exactly what each row
+  will do — *Insert 1 lined 8 mm page after 33*, *Insert image: Cornell.png*,
+  *Remove page 34*, *Undo…*, *Open Shelf*, *Hide this button*. A row that
+  cannot apply (no PDF open, no template chosen, nothing to undo) says so
+  rather than disappearing.
+- **A plain tap** opens the same menu. Switch to **Tap inserts** and a single
+  tap adds a page straight away.
+- **Drag it** anywhere; it remembers where you put it.
+- **The pen writes straight through it** — only finger touches count, so it
+  will not eat a stroke.
+- It is **off by default**, and it disappears when the device restarts the
+  plugin host; opening Shelf once brings it back.
+- **Hold it for three seconds and it removes itself.** The button is a window
+  owned by the plugin host, not by Shelf, so uninstalling or reloading Shelf
+  can leave it on screen with nothing left to dismiss it. The long hold is
+  handled by the button itself and always works; a long press also removes it
+  when there is no Shelf left to answer.
+
+Each action brings the Shelf panel up while it works, so progress and any
+error are visible, and the panel closes itself afterwards.
 
 ### PDF size limit
 

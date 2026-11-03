@@ -18,6 +18,7 @@ public class ShelfNavigationPackage implements ReactPackage {
         modules.add(new ShelfClipboardModule(reactContext));
         modules.add(new ShelfInkModule(reactContext));
         modules.add(new ShelfPdfEditModule(reactContext));
+        modules.add(new ShelfOverlayModule(reactContext));
         return modules;
     }
 

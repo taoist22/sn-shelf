@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native';
 import {PluginManager} from 'sn-plugin-lib';
-import {JS_BUILD} from '../app/shelfBuild';
+import {BUILD_ID} from '../app/shelfBuild';
 import {
   consumePendingCapture,
   SHELF_CAPTURE_EVENT,
@@ -30,6 +30,10 @@ import {
 } from '../domain/shelfItem';
 import {PDF_LIMIT_HINT, PDF_LIMIT_MB, pdfLargeNote, pdfSizeLevel} from '../domain/pdfSize';
 import {
+  backgroundLabel,
+  DRAWN_BACKGROUNDS,
+  spacingFor,
+  spacingsFor,
   TEMPLATE_SIZES,
   templateScale,
   templateSizeLabel,
@@ -37,6 +41,16 @@ import {
 } from '../domain/pdfInsertion';
 import type {ShelfContext} from '../domain/shelfState';
 import {checkPdfSize} from '../supernote/pdfSizeGate';
+import {
+  hideOverlayButton,
+  onOverlayEvent,
+  overlayAvailable,
+  OVERLAY_LONG_PRESS_EVENT,
+  OVERLAY_MENU_EVENT,
+  OVERLAY_TAP_EVENT,
+  showOverlayButton,
+  showOverlayMenu,
+} from '../supernote/shelfOverlay';
 import {
   openShelfFolder,
   openShelfTarget,
@@ -70,8 +84,18 @@ import {
   setPdfWorkSpace,
   getPdfTemplates,
   getPdfTemplateSize,
+  getOverlayEnabled,
+  getOverlayTapInserts,
+  getPdfInsertCount,
+  getPdfInsertPosition,
   getPdfTemplateShrink,
+  getPdfTemplateSpacing,
   rememberPdfTemplate,
+  setOverlayEnabled,
+  setOverlayTapInserts,
+  setPdfInsertCount,
+  setPdfInsertPosition,
+  setPdfTemplateSpacing,
   setPdfTemplateSize,
   setPdfTemplateShrink,
   setProjectWorkingNote,
@@ -90,6 +114,7 @@ import {
   clampInsertCount,
   pageAfterInsert,
   pageAfterUndo,
+  firstInsertedIndex,
   planInsertMoves,
   planUndoMoves,
   rollbackMoves,
@@ -104,6 +129,7 @@ import {
   getPdfWorkSpaces,
   insertPdfPages,
   isShelfInsertedPage,
+  reloadAndWaitForPages,
   removePdfPage,
   movePageMarks,
   pageMarkCount,
@@ -167,6 +193,8 @@ type PdfInsertState = {
   imageSize: TemplateSize;
   /** Re-encode the template for e-ink instead of embedding it as it is. */
   shrink: boolean;
+  /** Rule, grid or dot spacing in mm as seen on the device. */
+  spacing: number;
   /** Where the heavy work happens; offered only when an SD card is usable. */
   space: PdfWorkSpace;
   spaces: PdfWorkSpaces | null;
@@ -316,8 +344,17 @@ export function PluginScreen(): React.JSX.Element {
   // True while Insert Page / Undo is stepping between files. Opening another
   // file can fire lifecycle resets; they must not wipe the progress screen.
   const pdfOperationRef = useRef(false);
+  const [overlayOn, setOverlayOn] = useState(getOverlayEnabled());
+  const [tapInserts, setTapInserts] = useState(getOverlayTapInserts());
+
   /** When the file picker last closed; see PICKER_SETTLE_MS. */
   const pickerClosedRef = useRef(0);
+  /**
+   * The PDF whose pages the user has been working on this session. Reopening Shelf while
+   * reading it goes straight to Insert Page with the last settings, so adding a second page
+   * is two taps rather than six. Cancel clears it, so the panel stops insisting.
+   */
+  const insertUsedRef = useRef<string | null>(null);
   const detailGeneration = useRef(0);
 
   // Placement failures render large and bold so the user can tell at a
@@ -554,40 +591,41 @@ export function PluginScreen(): React.JSX.Element {
 
   // ---- Insert pages into the open PDF (docs/pdf-page-insertion-design.md) ----
 
-  const openPdfInsert = useCallback(async () => {
+  const openPdfInsert = useCallback(async (): Promise<PdfInsertState | null> => {
     try {
       const current = await getCurrentTarget();
       if (current.kind !== 'pdf') {
         setStatus('Insert Page works on PDFs only.');
-        return;
+        return null;
       }
       // Ask before the first log line: shelf-log.txt lives in EXPORT, so without write
       // permission every line up to the insert's own request was silently dropped and the
       // log began mid-flow (device log, 2026-10-30).
       await ensureFileWritePermission();
       await shelfLog(
-        `--- Insert Page opened on ${current.path} page ${current.page + 1} (js ${JS_BUILD})`,
+        `--- Insert Page opened on ${current.path} page ${current.page + 1} (js ${BUILD_ID})`,
       );
       const size = await checkPdfSize(current);
       if (size.level === 'tooLarge') {
         await shelfLog(`refused: ${size.bytes} bytes is over the limit`);
         setStatus(size.message);
-        return;
+        return null;
       }
       const undo = await getPdfUndo(current.path);
       const spaces = await getPdfWorkSpaces(current.path);
       await shelfLog(`workspaces: ${JSON.stringify(spaces)}; saved choice ${getPdfWorkSpace()}`);
-      setPdfInsert({
+      const next: PdfInsertState = {
         path: current.path,
         title: current.title,
         anchor: Math.max(0, current.page),
-        position: 'after',
-        count: 1,
+        position: getPdfInsertPosition(),
+        count: getPdfInsertCount(),
         background: 'lined',
         imagePath: '',
         templates: getPdfTemplates(),
         imageSize: getPdfTemplateSize(),
         shrink: getPdfTemplateShrink(),
+        spacing: spacingFor('lined', getPdfTemplateSpacing()),
         space: getPdfWorkSpace(),
         spaces,
         undo: undo && undo.path === current.path ? undo : null,
@@ -595,9 +633,12 @@ export function PluginScreen(): React.JSX.Element {
         undoWarning: null,
         removeWarning: null,
         error: '',
-      });
+      };
+      setPdfInsert(next);
+      return next;
     } catch (error) {
       setStatus(`Could not read the open PDF: ${String(error)}`);
+      return null;
     }
   }, []);
 
@@ -635,6 +676,52 @@ export function PluginScreen(): React.JSX.Element {
     );
   }, []);
 
+  const choosePosition = useCallback((position: InsertPosition) => {
+    setPdfInsertPosition(position);
+    setPdfInsert(previous =>
+      previous ? {...previous, position, warning: null, removeWarning: null, error: ''} : previous,
+    );
+  }, []);
+
+  const chooseCount = useCallback((count: number) => {
+    const clamped = clampInsertCount(count);
+    setPdfInsertCount(clamped);
+    setPdfInsert(previous =>
+      previous
+        ? {...previous, count: clamped, warning: null, removeWarning: null, error: ''}
+        : previous,
+    );
+  }, []);
+
+  const chooseSpacing = useCallback((spacing: number) => {
+    setPdfTemplateSpacing(spacing);
+    setPdfInsert(previous => (previous ? {...previous, spacing, error: ''} : previous));
+  }, []);
+
+  const toggleOverlay = useCallback(async (enabled: boolean) => {
+    setOverlayEnabled(enabled);
+    setOverlayOn(enabled);
+    if (enabled) {
+      const shown = await showOverlayButton();
+      if (!shown) {
+        setOverlayEnabled(false);
+        setOverlayOn(false);
+        setPdfInsert(previous =>
+          previous
+            ? {...previous, error: 'The floating button could not be shown on this firmware.'}
+            : previous,
+        );
+      }
+    } else {
+      await hideOverlayButton();
+    }
+  }, []);
+
+  const toggleTapInserts = useCallback((inserts: boolean) => {
+    setOverlayTapInserts(inserts);
+    setTapInserts(inserts);
+  }, []);
+
   const toggleShrink = useCallback((shrink: boolean) => {
     setPdfTemplateShrink(shrink);
     setPdfInsert(previous => (previous ? {...previous, shrink, error: ''} : previous));
@@ -644,6 +731,26 @@ export function PluginScreen(): React.JSX.Element {
     setPdfTemplateSize(imageSize);
     setPdfInsert(previous => (previous ? {...previous, imageSize, error: ''} : previous));
   }, []);
+
+  /**
+   * Reopening Shelf in the PDF whose pages you were just working on goes straight to
+   * Insert Page, with the last settings already chosen — adding a second page is then two
+   * taps. Cancel on that screen clears the memory, so it never insists.
+   */
+  const resumeInsertIfWorking = useCallback(async () => {
+    const path = insertUsedRef.current;
+    if (!path || pdfOperationRef.current) {
+      return;
+    }
+    try {
+      const current = await getCurrentTarget();
+      if (current.kind === 'pdf' && current.path === path) {
+        await openPdfInsert();
+      }
+    } catch {
+      // Not in a PDF, or the reader would not say: leave the shelf list alone.
+    }
+  }, [openPdfInsert]);
 
   const chooseWorkSpace = useCallback((space: PdfWorkSpace) => {
     setPdfWorkSpace(space);
@@ -686,8 +793,9 @@ export function PluginScreen(): React.JSX.Element {
   // sticks with the PDF closed, so Shelf steps out to a note, edits, and
   // comes back. Any failure puts everything back as it was.
   const runPdfInsert = useCallback(
-    async (confirmed: boolean) => {
-      const request = pdfInsert;
+    async (confirmed: boolean, override?: PdfInsertState) => {
+      // The floating button has no panel state to read, so it passes the request in.
+      const request = override ?? pdfInsert;
       if (!request) {
         return;
       }
@@ -725,9 +833,23 @@ export function PluginScreen(): React.JSX.Element {
         });
         return;
       }
-      const stepOut = noteToStepOutTo();
-      await shelfLog(`step out to: ${stepOut ? stepOut.path : 'NONE'}`);
-      if (!stepOut) {
+      // Stepping out of the PDF is only needed to move handwriting, because the mark
+      // calls are live-only while the reader holds the file. With nothing to move — the
+      // usual case when adding a page as you read forward — Shelf stays in the PDF and
+      // just rewrites the file, which is quicker and far less jarring.
+      const plannedFirst = firstInsertedIndex(request.anchor, request.position);
+      const plannedMoves = marked
+        ? planInsertMoves(marked, plannedFirst, request.count)
+        : [];
+      const stepOut = plannedMoves.length > 0 ? noteToStepOutTo() : null;
+      await shelfLog(
+        plannedMoves.length > 0
+          ? `${plannedMoves.length} page(s) of handwriting to move; step out to: ${
+              stepOut ? stepOut.path : 'NONE'
+            }`
+          : 'no handwriting to move: staying in the PDF',
+      );
+      if (plannedMoves.length > 0 && !stepOut) {
         setPdfInsert({...request, warning: null, error: NO_NOTE_MESSAGE});
         return;
       }
@@ -743,10 +865,12 @@ export function PluginScreen(): React.JSX.Element {
         setPdfInsert({...request, warning: null, error: message});
       };
 
-      setPlacing('Closing the PDF…');
-      if (!(await openFileAndWait(stepOut.path, -1))) {
-        await fail(`Couldn't step out of the PDF into ${stepOut.title}, so nothing was changed.`, true);
-        return;
+      if (stepOut) {
+        setPlacing('Closing the PDF…');
+        if (!(await openFileAndWait(stepOut.path, -1))) {
+          await fail(`Couldn't step out of the PDF into ${stepOut.title}, so nothing was changed.`, true);
+          return;
+        }
       }
 
       const plural = request.count === 1 ? '' : 's';
@@ -763,6 +887,7 @@ export function PluginScreen(): React.JSX.Element {
           request.imagePath,
           templateScale(request.imageSize),
           request.shrink,
+          request.spacing,
         );
       } catch (error) {
         await fail(pdfEditErrorMessage(error), true);
@@ -807,8 +932,22 @@ export function PluginScreen(): React.JSX.Element {
         pageAfterInsert(page, result.firstInsertedIndex, result.count),
       );
       await flushShelfState();
+      insertUsedRef.current = request.path;
       setPlacing('Opening the new page…');
-      await openFileAndWait(request.path, result.firstInsertedIndex);
+      if (stepOut) {
+        await openFileAndWait(request.path, result.firstInsertedIndex);
+      } else if (
+        !(await reloadAndWaitForPages(request.path, result.firstInsertedIndex, result.finalCount))
+      ) {
+        // The reader kept its old page count, which is what caused "The page does not
+        // exist" before. Step out and back to force a genuine reload.
+        const note = noteToStepOutTo();
+        await shelfLog(`reader kept the old page count; forcing a reload via ${note ? note.path : 'NONE'}`);
+        if (note) {
+          await openFileAndWait(note.path, -1);
+        }
+        await openFileAndWait(request.path, result.firstInsertedIndex);
+      }
       pdfOperationRef.current = false;
       PluginManager.closePluginView();
     },
@@ -825,8 +964,8 @@ export function PluginScreen(): React.JSX.Element {
    * before the page goes, because a mark can only move to a page that exists.
    */
   const runPdfRemove = useCallback(
-    async (confirmed: boolean) => {
-      const request = pdfInsert;
+    async (confirmed: boolean, override?: PdfInsertState) => {
+      const request = override ?? pdfInsert;
       if (!request) {
         return;
       }
@@ -927,6 +1066,7 @@ export function PluginScreen(): React.JSX.Element {
 
       shiftDocumentPages(request.path, p => pageAfterUndo(p, page, 1, result.originalCount));
       await flushShelfState();
+      insertUsedRef.current = request.path;
       setPlacing('Reopening the PDF…');
       await openFileAndWait(request.path, Math.min(page, result.finalCount - 1));
       pdfOperationRef.current = false;
@@ -936,8 +1076,8 @@ export function PluginScreen(): React.JSX.Element {
   );
 
   const runPdfUndo = useCallback(
-    async (confirmed: boolean) => {
-      const request = pdfInsert;
+    async (confirmed: boolean, override?: PdfInsertState) => {
+      const request = override ?? pdfInsert;
       const record = request?.undo;
       if (!request || !record) {
         return;
@@ -1062,6 +1202,116 @@ export function PluginScreen(): React.JSX.Element {
     },
     [pdfInsert, noteToStepOutTo],
   );
+
+  /**
+   * What the floating button does. Each action brings the panel back up before working, so
+   * progress and errors have somewhere to appear and the proven flows are reused as they
+   * are — rather than a second, headless copy of them that nobody can see failing.
+   */
+  const runOverlayAction = useCallback(
+    async (id: string) => {
+      await shelfLog(`overlay: ${id}`);
+      if (id === 'hide') {
+        setOverlayEnabled(false);
+        await hideOverlayButton();
+        return;
+      }
+      if (id === 'open') {
+        await PluginManager.showPluginView();
+        return;
+      }
+      if (id !== 'insert' && id !== 'image' && id !== 'remove' && id !== 'undo') {
+        return; // a row from a newer build than this JS
+      }
+      await PluginManager.showPluginView();
+      const state = await openPdfInsert();
+      if (!state) {
+        return;
+      }
+      if (id === 'remove') {
+        await runPdfRemove(false, state);
+        return;
+      }
+      if (id === 'undo') {
+        if (!state.undo) {
+          setPdfInsert({...state, error: 'There is nothing to undo for this PDF.'});
+          return;
+        }
+        await runPdfUndo(false, state);
+        return;
+      }
+      if (id === 'image') {
+        const template = state.imagePath || state.templates[0];
+        if (!template) {
+          setPdfInsert({
+            ...state,
+            background: 'image',
+            error: 'Choose a template image first — tap Image… then Choose.',
+          });
+          return;
+        }
+        const withImage: PdfInsertState = {...state, background: 'image', imagePath: template};
+        setPdfInsert(withImage);
+        await runPdfInsert(false, withImage);
+        return;
+      }
+      await runPdfInsert(false, state);
+    },
+    [openPdfInsert, runPdfInsert, runPdfRemove, runPdfUndo],
+  );
+
+  /** Builds the long-press menu, every row saying exactly what it will do. */
+  const openOverlayMenu = useCallback(async () => {
+    let current: ShelfTarget | null = null;
+    try {
+      current = await getCurrentTarget();
+    } catch {
+      current = null;
+    }
+    const inPdf = current?.kind === 'pdf';
+    const page = (current?.page ?? 0) + 1;
+    const templates = getPdfTemplates();
+    const template = templates[0];
+    const spacing = spacingFor('lined', getPdfTemplateSpacing());
+    const count = getPdfInsertCount();
+    const position = getPdfInsertPosition();
+    const undo = inPdf && current ? await getPdfUndo(current.path) : null;
+
+    await showOverlayMenu([
+      {
+        id: 'insert',
+        label: inPdf
+          ? `Insert ${count} lined ${spacing} mm page${count === 1 ? '' : 's'} ${position} ${page}`
+          : 'Insert a page — open a PDF first',
+        enabled: inPdf,
+      },
+      {
+        id: 'image',
+        label: template
+          ? `Insert image: ${fileName(template)}`
+          : 'Insert image — choose one in Shelf first',
+        enabled: inPdf && Boolean(template),
+      },
+      {
+        id: 'remove',
+        label: inPdf ? `Remove page ${page}` : 'Remove a page — open a PDF first',
+        enabled: inPdf,
+      },
+      {
+        id: 'undo',
+        label: undo
+          ? undo.action === 'remove'
+            ? `Undo: put page ${undo.firstInsertedIndex + 1} back`
+            : `Undo: remove ${undo.count} page${undo.count === 1 ? '' : 's'} at ${
+                undo.firstInsertedIndex + 1
+              }`
+          : 'Undo — nothing to undo',
+        enabled: Boolean(undo),
+      },
+      {id: 'open', label: 'Open Shelf'},
+      {id: 'hide', label: 'Hide this button'},
+    ]);
+  }, []);
 
   // Outside a note, a project quote's main button opens its working note.
   const openWorkingNote = useCallback(async (project: ShelfProject) => {
@@ -1301,6 +1551,7 @@ export function PluginScreen(): React.JSX.Element {
       // must see that ink.
       invalidateObstacleScans();
       refresh();
+      resumeInsertIfWorking();
     });
 
     const captureSub = DeviceEventEmitter.addListener(
@@ -1317,7 +1568,48 @@ export function PluginScreen(): React.JSX.Element {
       openedSub.remove();
       captureSub.remove();
     };
-  }, [refresh, startCapture]);
+  }, [refresh, resumeInsertIfWorking, startCapture]);
+
+  // The button's handlers change on every render (they close over panel state), so they are
+  // reached through refs. Without this the effect below re-ran constantly, re-showing the
+  // window — it blinked and could not be touched (device report, 2026-11-02).
+  const overlayActionRef = useRef<(id: string) => void>(() => {});
+  const overlayMenuRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    overlayActionRef.current = runOverlayAction;
+    overlayMenuRef.current = openOverlayMenu;
+  }, [openOverlayMenu, runOverlayAction]);
+
+  // Mounted once. The floating button belongs to the host process, not to this view.
+  useEffect(() => {
+    const tapSub = onOverlayEvent(OVERLAY_TAP_EVENT, () => {
+      // Logged as well as the action, so a report can be read as a sequence.
+      shelfLog(getOverlayTapInserts() ? 'overlay: tap (inserts)' : 'overlay: tap (menu)');
+      if (getOverlayTapInserts()) {
+        overlayActionRef.current('insert');
+      } else {
+        overlayMenuRef.current();
+      }
+    });
+    const longPressSub = onOverlayEvent(OVERLAY_LONG_PRESS_EVENT, () => {
+      shelfLog('overlay: long press (menu)');
+      overlayMenuRef.current();
+    });
+    const menuSub = onOverlayEvent(OVERLAY_MENU_EVENT, payload => {
+      if (payload?.id) {
+        overlayActionRef.current(payload.id);
+      }
+    });
+    // It does not survive a host restart, so re-show it whenever Shelf loads.
+    if (getOverlayEnabled()) {
+      showOverlayButton();
+    }
+    return () => {
+      tapSub.remove();
+      longPressSub.remove();
+      menuSub.remove();
+    };
+  }, []);
 
   const openDetail = useCallback((item: ShelfTarget) => {
     const generation = ++detailGeneration.current;
@@ -2140,10 +2432,10 @@ export function PluginScreen(): React.JSX.Element {
         <Text style={styles.captureHeading}>{'WHERE'}</Text>
         <View style={styles.actionsRow}>
           {renderChoice(`Before ${pageLabel}`, request.position === 'before', () =>
-            updatePdfInsert({position: 'before'}),
+            choosePosition('before'),
           )}
           {renderChoice(`After ${pageLabel}`, request.position === 'after', () =>
-            updatePdfInsert({position: 'after'}),
+            choosePosition('after'),
           )}
         </View>
 
@@ -2151,13 +2443,13 @@ export function PluginScreen(): React.JSX.Element {
         <View style={styles.actionsRow}>
           <Pressable
             style={styles.rowButtonSecondary}
-            onPress={() => updatePdfInsert({count: clampInsertCount(request.count - 1)})}>
+            onPress={() => chooseCount(request.count - 1)}>
             <Text style={styles.rowButtonSecondaryText}>{'−'}</Text>
           </Pressable>
           <Text style={styles.pdfInsertCount}>{`${request.count}`}</Text>
           <Pressable
             style={styles.rowButtonSecondary}
-            onPress={() => updatePdfInsert({count: clampInsertCount(request.count + 1)})}>
+            onPress={() => chooseCount(request.count + 1)}>
             <Text style={styles.rowButtonSecondaryText}>{'+'}</Text>
           </Pressable>
           <Text style={styles.captureInkHint}>{`Up to ${MAX_INSERT_PAGES} at a time.`}</Text>
@@ -2165,16 +2457,37 @@ export function PluginScreen(): React.JSX.Element {
 
         <Text style={styles.captureHeading}>{'BACKGROUND'}</Text>
         <View style={styles.actionsRow}>
-          {renderChoice('Blank', request.background === 'blank', () =>
-            updatePdfInsert({background: 'blank'}),
-          )}
-          {renderChoice('Lined (8 mm)', request.background === 'lined', () =>
-            updatePdfInsert({background: 'lined'}),
+          {DRAWN_BACKGROUNDS.map(background =>
+            renderChoice(
+              backgroundLabel(background),
+              request.background === background,
+              () =>
+                updatePdfInsert({
+                  background,
+                  spacing: spacingFor(background, request.spacing),
+                }),
+            ),
           )}
           {renderChoice('Image…', request.background === 'image', () =>
             updatePdfInsert({background: 'image'}),
           )}
         </View>
+
+        {spacingsFor(request.background).length > 0 ? (
+          <>
+            <Text style={styles.captureHeading}>{'SPACING'}</Text>
+            <View style={styles.actionsRow}>
+              {spacingsFor(request.background).map(spacing =>
+                renderChoice(`${spacing} mm`, request.spacing === spacing, () =>
+                  chooseSpacing(spacing),
+                ),
+              )}
+            </View>
+            <Text style={styles.captureInkHint}>
+              {'Measured as it looks on the device, like the built-in templates — Shelf allows for the reader shrinking the page to fit.'}
+            </Text>
+          </>
+        ) : null}
 
         {request.background === 'image' ? (
           <>
@@ -2271,10 +2584,19 @@ export function PluginScreen(): React.JSX.Element {
             style={styles.rowButton}
             onPress={() => runPdfInsert(request.warning !== null)}>
             <Text style={styles.rowButtonText}>
-              {request.warning ? 'Insert Anyway' : `Insert ${request.count} Page${plural}`}
+              {request.warning
+                ? 'Insert Anyway'
+                : `Insert ${request.count} ${backgroundLabel(request.background)
+                    .replace('…', '')
+                    .toLowerCase()} page${plural} ${request.position} ${request.anchor + 1}`}
             </Text>
           </Pressable>
-          <Pressable style={styles.rowButtonSecondary} onPress={() => setPdfInsert(null)}>
+          <Pressable
+            style={styles.rowButtonSecondary}
+            onPress={() => {
+              insertUsedRef.current = null;
+              setPdfInsert(null);
+            }}>
             <Text style={styles.rowButtonSecondaryText}>{'Cancel'}</Text>
           </Pressable>
         </View>
@@ -2325,9 +2647,30 @@ export function PluginScreen(): React.JSX.Element {
           </View>
         ) : null}
 
+        {overlayAvailable() ? (
+          <>
+            <Text style={styles.captureHeading}>{'FLOATING BUTTON'}</Text>
+            <View style={styles.actionsRow}>
+              {renderChoice(overlayOn ? 'On' : 'Off', overlayOn, () => toggleOverlay(!overlayOn))}
+              {overlayOn
+                ? renderChoice(
+                    tapInserts ? 'Tap inserts' : 'Tap opens the menu',
+                    tapInserts,
+                    () => toggleTapInserts(!tapInserts),
+                  )
+                : null}
+            </View>
+            <Text style={styles.captureInkHint}>
+              {overlayOn
+                ? 'A finger-only button over the page: long-press for the menu. Drag it where you want it. The pen writes straight through it.'
+                : 'Adds a small button over the page so a second page is one long-press, without opening Shelf.'}
+            </Text>
+          </>
+        ) : null}
+
         {/* Both halves stamped: a log or a screenshot now says which code ran. */}
         <Text style={styles.captureInkHint}>
-          {`Shelf js ${JS_BUILD} · native ${request.spaces?.nativeBuild ?? 'unknown — reinstall'}`}
+          {`Shelf js ${BUILD_ID} · native ${request.spaces?.nativeBuild ?? 'unknown — reinstall'}`}
         </Text>
       </>
     );

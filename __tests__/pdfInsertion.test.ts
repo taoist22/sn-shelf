@@ -3,8 +3,12 @@ import {
   MAX_INSERT_PAGES,
   MAX_TEMPLATES,
   clampInsertCount,
+  backgroundLabel,
+  DRAWN_BACKGROUNDS,
   isImageFile,
   parseTemplateSize,
+  spacingFor,
+  spacingsFor,
   rememberTemplate,
   TEMPLATE_SIZES,
   templateScale,
@@ -179,5 +183,32 @@ describe('removing a page Shelf added', () => {
     const plan = planUndoMoves([0, 1], 5, 1);
     expect(plan.clear).toEqual([]);
     expect(plan.moves).toEqual([]);
+  });
+});
+
+describe('drawn backgrounds', () => {
+  it('offers the drawn set, blank first', () => {
+    expect(DRAWN_BACKGROUNDS).toEqual(['blank', 'lined', 'grid', 'dots']);
+    expect(backgroundLabel('dots')).toBe('Dots');
+    expect(backgroundLabel('image')).toBe('Image…');
+  });
+
+  it('offers spacings only where they mean something', () => {
+    expect(spacingsFor('lined')).toEqual([6, 8, 10]);
+    expect(spacingsFor('grid')).toEqual([5, 10]);
+    expect(spacingsFor('blank')).toEqual([]);
+    expect(spacingsFor('image')).toEqual([]);
+  });
+
+  it('keeps a remembered spacing when it still applies', () => {
+    expect(spacingFor('lined', 10)).toBe(10);
+    expect(spacingFor('blank', 8)).toBe(0);
+  });
+
+  it('falls to the nearest offered spacing when it does not', () => {
+    // 8 mm rules → grid, which has no 8: 10 is nearer than 5.
+    expect(spacingFor('grid', 8)).toBe(10);
+    expect(spacingFor('grid', 6)).toBe(5);
+    expect(spacingFor('lined', 5)).toBe(6);
   });
 });

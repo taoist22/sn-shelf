@@ -1,6 +1,10 @@
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
 import {normalizeDevicePath, projectNoteTarget} from '../domain/shelfItem';
-import {rememberTemplate, type TemplateSize} from '../domain/pdfInsertion';
+import {
+  type InsertPosition,
+  rememberTemplate,
+  type TemplateSize,
+} from '../domain/pdfInsertion';
 import {
   createProject,
   deleteProject,
@@ -272,6 +276,54 @@ export function getPdfTemplateShrink(): boolean {
 
 export function setPdfTemplateShrink(shrink: boolean): void {
   state.pdfTemplateShrink = shrink;
+  persist();
+}
+
+/** Last rule/grid/dot spacing the user chose, in millimetres as seen on the device. */
+export function getPdfTemplateSpacing(): number {
+  return state.pdfTemplateSpacing ?? 8;
+}
+
+export function setPdfTemplateSpacing(spacing: number): void {
+  state.pdfTemplateSpacing = spacing;
+  persist();
+}
+
+/** Last Insert Page position and count: the defaults the next insert repeats. */
+export function getPdfInsertPosition(): InsertPosition {
+  return state.pdfInsertPosition ?? 'after';
+}
+
+export function setPdfInsertPosition(position: InsertPosition): void {
+  state.pdfInsertPosition = position;
+  persist();
+}
+
+export function getPdfInsertCount(): number {
+  return state.pdfInsertCount ?? 1;
+}
+
+export function setPdfInsertCount(count: number): void {
+  state.pdfInsertCount = count;
+  persist();
+}
+
+/** Shelf's floating button: off by default, so installing can't make things worse. */
+export function getOverlayEnabled(): boolean {
+  return state.overlayEnabled ?? false;
+}
+
+export function setOverlayEnabled(enabled: boolean): void {
+  state.overlayEnabled = enabled;
+  persist();
+}
+
+export function getOverlayTapInserts(): boolean {
+  return state.overlayTapInserts ?? false;
+}
+
+export function setOverlayTapInserts(tapInserts: boolean): void {
+  state.overlayTapInserts = tapInserts;
   persist();
 }
 

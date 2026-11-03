@@ -119,7 +119,12 @@ export function formatPage(page: number): string {
 export function makeShelfTarget(
   path: string,
   page: number,
-  openAtLastUsed = false,
+  /**
+   * Defaults to what the kind deserves rather than to false. The old default of false was
+   * stored on every pinned card, so a PDF pinned once at page 14 reopened at page 14 for
+   * ever, whatever the reader's own bookmark said (device report, 2026-11-02).
+   */
+  openAtLastUsed = isDocumentKind(detectShelfKind(path)) || page === 0,
 ): ShelfTarget {
   return {
     id: `${path}:${page}:${Date.now()}`,
@@ -132,11 +137,22 @@ export function makeShelfTarget(
   };
 }
 
-/** Preserves the pre-0.2.5 behavior for persisted pins without the flag. */
+/**
+ * Whether opening this card should resume the reader's own place rather than jump to the
+ * page the card remembers.
+ *
+ * A document ALWAYS resumes: you read through a PDF, so its card is a way back into it, not
+ * a bookmark to one page. This deliberately ignores a stored `false` — cards pinned before
+ * 2026-11-02 carry one, and honouring it sent the user back to page 14 of a book they had
+ * read to page 40. A quote's source link still jumps to its exact page, because that call
+ * passes the page itself rather than coming through here.
+ */
 export function targetOpensAtLastUsedPage(target: ShelfTarget): boolean {
+  if (isDocumentKind(target.kind)) {
+    return true;
+  }
   if (typeof target.openAtLastUsed === 'boolean') {
     return target.openAtLastUsed;
   }
-  return isDocumentKind(target.kind) ||
-    (target.kind === 'note' && target.page === 0);
+  return target.kind === 'note' && target.page === 0;
 }

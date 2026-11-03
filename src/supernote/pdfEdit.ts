@@ -1,5 +1,5 @@
 import {NativeModules} from 'react-native';
-import {PluginCommAPI, PluginFileAPI} from 'sn-plugin-lib';
+import {PluginCommAPI, PluginDocAPI, PluginFileAPI} from 'sn-plugin-lib';
 import type {InsertBackground, InsertPosition} from '../domain/pdfInsertion';
 import type {PdfWorkSpace} from '../storage/nativeShelfStorage';
 import {shelfLog} from './shelfLog';
@@ -14,8 +14,8 @@ export type PdfWorkSpaces = {
   pdfSizeBytes: number;
   /** Why the SD card is or isn't usable, shown when the choice is not offered. */
   sdReason?: string;
-  /** ShelfPdfEditModule.NATIVE_BUILD; absent = an older native package is running. */
-  nativeBuild?: number;
+  /** ShelfPdfEditModule.BUILD_ID; absent = an older native package is running. */
+  nativeBuild?: string;
 };
 
 // Bridge to ShelfPdfEditModule (PDFBox-Android): in-place page insertion into
@@ -53,6 +53,7 @@ type ShelfPdfEditBridge = {
     imagePath: string,
     imageScale: number,
     shrinkImage: boolean,
+    spacingMm: number,
   ): Promise<PdfInsertResult>;
   getWorkSpaces(path: string): Promise<PdfWorkSpaces>;
   isShelfPage(path: string, pageIndex: number): Promise<boolean>;
@@ -87,6 +88,8 @@ export function insertPdfPages(
   imageScale = 1,
   /** Re-encode the template for the e-ink screen instead of embedding it as it is. */
   shrinkImage = true,
+  /** Rule, grid or dot spacing in millimetres as seen on the device; 0 for none. */
+  spacingMm = 8,
 ): Promise<PdfInsertResult> {
   return requireBridge().insertPages(
     path,
@@ -98,6 +101,7 @@ export function insertPdfPages(
     imagePath,
     imageScale,
     shrinkImage,
+    spacingMm,
   );
 }
 
@@ -291,6 +295,52 @@ export async function movePageMarks(path: string, from: number, to: number): Pro
  * reader reports it as the open file. Used to step OUT of a PDF before editing
  * its handwriting, and back into it afterwards. Returns false on timeout.
  */
+/** Pages the reader currently thinks the open document has, or null if it won't say. */
+export async function readerTotalPages(): Promise<number | null> {
+  try {
+    const res = (await PluginDocAPI.getCurrentTotalPages()) as MarkApiResponse<number>;
+    return res?.success && typeof res.result === 'number' ? res.result : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reopens the PDF the reader already has open and waits for it to notice the new page
+ * count. Used by the fast path, where the file was rewritten underneath the reader instead
+ * of stepping out to a note: the reader caches the page count, and acting on a stale one is
+ * what produced "The page does not exist" before. Returns false if it never catches up, so
+ * the caller can fall back to stepping out.
+ */
+export async function reloadAndWaitForPages(
+  path: string,
+  page: number,
+  expected: number,
+  timeoutMs = 6000,
+): Promise<boolean> {
+  await shelfLog(`reload ${path} page ${page}, expecting ${expected} pages`);
+  try {
+    await PluginFileAPI.openFile(path, page);
+  } catch (error) {
+    await shelfLog(`reload openFile threw ${String(error)}`);
+    return false;
+  }
+  const deadline = Date.now() + timeoutMs;
+  let checks = 0;
+  let last: number | null = null;
+  while (Date.now() < deadline) {
+    checks += 1;
+    last = await readerTotalPages();
+    if (last === expected) {
+      await shelfLog(`reader reloaded after ${checks} check(s)`);
+      return true;
+    }
+    await nativeDelay(300);
+  }
+  await shelfLog(`reader still reports ${last} pages after ${checks} check(s)`);
+  return false;
+}
+
 export async function openFileAndWait(path: string, page: number, timeoutMs = 10000): Promise<boolean> {
   await shelfLog(`open ${path} page ${page}`);
   try {
@@ -326,7 +376,7 @@ export async function openFileAndWait(path: string, page: number, timeoutMs = 10
  * fire then, and stepping out of a PDF can hide the panel — Insert Page froze
  * on exactly this wait (device report 2026-09-19).
  */
-async function nativeDelay(ms: number): Promise<void> {
+export async function nativeDelay(ms: number): Promise<void> {
   if (ShelfPdfEdit?.delay) {
     await ShelfPdfEdit.delay(ms);
     return;

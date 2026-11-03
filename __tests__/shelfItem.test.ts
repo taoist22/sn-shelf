@@ -88,19 +88,29 @@ describe('makeShelfTarget', () => {
 });
 
 describe('targetOpensAtLastUsedPage', () => {
-  it('distinguishes Browse entries from exact-page pins', () => {
+  // A document card is a way back into a book, not a bookmark to one page: it resumes
+  // wherever the reader got to. Before 2026-11-02 a pin stored openAtLastUsed: false and
+  // honouring it reopened page 14 of a PDF the user had read to page 40.
+  it('resumes a document however the pin was stored', () => {
     expect(
       targetOpensAtLastUsedPage(makeShelfTarget('/Document/Book.pdf', 3, true)),
     ).toBe(true);
     expect(
       targetOpensAtLastUsedPage(makeShelfTarget('/Document/Book.pdf', 3)),
-    ).toBe(false);
+    ).toBe(true);
+    const legacyPin = {...makeShelfTarget('/Document/Book.pdf', 3), openAtLastUsed: false};
+    expect(targetOpensAtLastUsedPage(legacyPin)).toBe(true);
+  });
+
+  it('still opens a note on the page it was pinned at', () => {
+    expect(targetOpensAtLastUsedPage(makeShelfTarget('/Note/Working.note', 3))).toBe(false);
+    expect(targetOpensAtLastUsedPage(makeShelfTarget('/Note/Working.note', 0))).toBe(true);
   });
 
   it('preserves legacy persisted behavior when the flag is absent', () => {
-    const legacyDocument = makeShelfTarget('/Document/Book.pdf', 3);
-    delete legacyDocument.openAtLastUsed;
-    expect(targetOpensAtLastUsedPage(legacyDocument)).toBe(true);
+    const legacyNote = makeShelfTarget('/Note/Working.note', 0);
+    delete legacyNote.openAtLastUsed;
+    expect(targetOpensAtLastUsedPage(legacyNote)).toBe(true);
   });
 });
 

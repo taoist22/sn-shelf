@@ -5,7 +5,53 @@
 export const MAX_INSERT_PAGES = 20;
 
 export type InsertPosition = 'before' | 'after';
-export type InsertBackground = 'blank' | 'lined' | 'image';
+export type InsertBackground = 'blank' | 'lined' | 'grid' | 'dots' | 'image';
+
+/**
+ * Spacings offered per drawn background, in millimetres AS SEEN ON THE DEVICE — Shelf
+ * compensates for the reader shrinking the page to fit, so these match the device's own
+ * templates rather than measuring 8 mm on a page nobody prints.
+ */
+const SPACINGS: Record<string, number[]> = {
+  lined: [6, 8, 10],
+  grid: [5, 10],
+  dots: [5, 10],
+};
+
+export function spacingsFor(background: InsertBackground): number[] {
+  return SPACINGS[background] ?? [];
+}
+
+/** Keeps a remembered spacing usable when the background changes (8 mm → 10 mm grid). */
+export function spacingFor(background: InsertBackground, remembered: number): number {
+  const options = spacingsFor(background);
+  if (options.length === 0) {
+    return 0;
+  }
+  if (options.includes(remembered)) {
+    return remembered;
+  }
+  return options.reduce((best, option) =>
+    Math.abs(option - remembered) < Math.abs(best - remembered) ? option : best,
+  );
+}
+
+export function backgroundLabel(background: InsertBackground): string {
+  switch (background) {
+    case 'blank':
+      return 'Blank';
+    case 'lined':
+      return 'Lined';
+    case 'grid':
+      return 'Grid';
+    case 'dots':
+      return 'Dots';
+    default:
+      return 'Image…';
+  }
+}
+
+export const DRAWN_BACKGROUNDS: InsertBackground[] = ['blank', 'lined', 'grid', 'dots'];
 
 /** How many recently used template images Shelf offers on the Insert Page screen. */
 export const MAX_TEMPLATES = 5;
