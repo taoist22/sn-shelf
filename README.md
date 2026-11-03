@@ -283,6 +283,35 @@ change, because its text was never what made it big.
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
 
+## Changes in 0.2.9
+
+- **A floating button, so inserting a page no longer means going back into
+  Shelf.** Turn it on in Insert Page and a small **+** sits on top of whatever
+  you are reading. **Tap it with a finger** and it inserts a page using the
+  settings you last chose in the plugin. **Long press it** for a short menu:
+  Insert page, Insert image, Remove page, Undo, Open Shelf, Hide. Your pen and
+  the eraser pass straight through it, so you can write under it and move it
+  wherever it suits you.
+- **Shelf remembers your Insert Page settings** — template, size, shrink,
+  spacing, where the page goes and how many — so the floating button and your
+  next visit both start where you left off.
+- **Choose the line spacing, and 8 mm now measures 8 mm on screen.** The reader
+  shrinks a page to fit the display, so lines drawn 8 mm apart on a Letter page
+  arrived about 6 mm apart on a Manta. Spacing is now corrected for that fit,
+  and Lined offers 6/8/10 mm with Grid and Dots at 5/10 mm.
+- **Fixed: a pinned PDF reopened the wrong page.** A document card always went
+  back to the page it was pinned at — page 14 of a book read to page 40 —
+  instead of resuming. Documents now always resume where you left off; notes
+  still open on the page you pinned.
+- **Inserting is quicker when nothing has to move.** If there is no handwriting
+  after the new page, Shelf no longer closes and reopens the document.
+- **The floating button can always be dismissed.** It belongs to the device's
+  plugin host rather than to Shelf, so uninstalling or reloading Shelf could
+  leave it on screen. **Hold it for three seconds and it removes itself.**
+- **The build stamp is generated, not typed.** Both halves of the plugin carry
+  the same date, time and commit, so a half-finished install shows two
+  different values on the Insert Page screen.
+
 ## Changes in 0.2.8
 
 - **Insert a page from your own PNG or JPEG.** Background now offers
