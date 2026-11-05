@@ -292,7 +292,7 @@ change, because its text was never what made it big.
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
 
-## Unreleased
+## Changes in 0.2.10
 
 - **Fixed: the floating button's Open Shelf could hang the device.** After a
   successful insert, remove or undo, Shelf closed the panel without clearing

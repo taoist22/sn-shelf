@@ -3,4 +3,4 @@
 // The date, time and git hash of the build that produced this bundle. The native half
 // (ShelfPdfEditModule.BUILD_ID) is stamped with the same string in the same run, so if the
 // Insert Page screen shows two different values, the install is half old.
-export const BUILD_ID = '2026-11-04 15:43 87291ee';
+export const BUILD_ID = '2026-11-04 16:42 4e84894';
