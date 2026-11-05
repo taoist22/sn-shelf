@@ -50,19 +50,36 @@ public class ShelfStorageModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /**
+     * Writes to a temp file, forces it to disk, then renames over the real one.
+     * The old truncate-in-place write could leave half a JSON document if it was
+     * interrupted, and a half document parses as an EMPTY shelf, which the next
+     * save then made permanent (found while diagnosing a shelf that looked
+     * truncated, 2026-11-04).
+     */
     @ReactMethod
     public void writeState(String json, Promise promise) {
+        File file = new File(reactContext.getFilesDir(), FILE_NAME);
+        File temp = new File(reactContext.getFilesDir(), FILE_NAME + ".new");
         try {
-            File file = new File(reactContext.getFilesDir(), FILE_NAME);
-            FileOutputStream output = new FileOutputStream(file, false);
+            FileOutputStream output = new FileOutputStream(temp, false);
             try {
                 output.write(json.getBytes(StandardCharsets.UTF_8));
                 output.flush();
+                output.getFD().sync();
             } finally {
                 output.close();
             }
+            if (!temp.renameTo(file)) {
+                // Rename within one directory should not fail; if it does, the
+                // old file is still intact and the temp file is the casualty.
+                temp.delete();
+                promise.reject("SHELF_STORAGE_WRITE_FAILED", "Could not replace the shelf state file.");
+                return;
+            }
             promise.resolve(true);
         } catch (Exception error) {
+            temp.delete();
             promise.reject("SHELF_STORAGE_WRITE_FAILED", error);
         }
     }

@@ -4,6 +4,11 @@ import {
   parsePersistedShelfState,
 } from '../src/storage/nativeShelfStorage';
 import type {ShelfTarget} from '../src/domain/shelfItem';
+import {
+  createProject,
+  findProject,
+  moveGeneralItemToProject,
+} from '../src/domain/shelfState';
 
 function target(overrides: Partial<ShelfTarget> = {}): ShelfTarget {
   return {
@@ -192,5 +197,38 @@ describe('Insert Page working space setting', () => {
     expect(parsePersistedShelfState(JSON.stringify({...base, pdfWorkSpace: 'sd'})).pdfWorkSpace).toBe('sd');
     expect(parsePersistedShelfState(JSON.stringify({...base, pdfWorkSpace: 'cloud'})).pdfWorkSpace).toBeUndefined();
     expect(parsePersistedShelfState(JSON.stringify(base)).pdfWorkSpace).toBeUndefined();
+  });
+});
+
+describe('path forms', () => {
+  // Before 2026-11-04 these comparisons were raw string equality, so the same
+  // note reported in two forms could anchor two projects and split the shelf.
+  it('finds an existing project whichever form the path arrives in', () => {
+    const state = emptyShelfState();
+    createProject(state, '/storage/emulated/0/Note/Working.note', 'Working');
+    expect(findProject(state, '/Note/Working.note')?.anchorTitle).toBe('Working');
+    createProject(state, '/Note/Working.note', 'Working');
+    expect(state.projects).toHaveLength(1);
+  });
+
+  it('does not pin the same page twice through a different path form', () => {
+    const state = emptyShelfState();
+    createProject(state, '/Note/Working.note', 'Working');
+    const project = findProject(state, '/Note/Working.note')!;
+    project.references = [
+      {
+        id: 'a',
+        path: '/storage/emulated/0/Document/Book.pdf',
+        title: 'Book',
+        page: 3,
+        kind: 'pdf',
+        addedAt: 1,
+      },
+    ];
+    state.general = [
+      {id: 'b', path: '/Document/Book.pdf', title: 'Book', page: 3, kind: 'pdf', addedAt: 2},
+    ];
+    moveGeneralItemToProject(state, 'b', '/Note/Working.note');
+    expect(project.references).toHaveLength(1);
   });
 });

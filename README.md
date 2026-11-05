@@ -26,7 +26,11 @@ the loop between where you write and what you're reading.
   are in when you open it: a project note or any of its materials shows that
   project's shelf; anywhere else shows the General Shelf. Priority when a
   file could belong to several: note anchor > pinned reference > containing
-  folder (deepest wins) > general.
+  folder (deepest wins) > general. This means the Shelf tab shows **one**
+  shelf at a time, and which one depends on the open file — stepping out to
+  an unrelated note (via Last Note Opened, say) shows the General Shelf
+  instead. Nothing is lost: **tap a project on the Projects tab to see its
+  shelf from anywhere.**
 - **Quotes** — text captured from documents waits in a per-project inbox
   until you place it into the working note. Quotes can also be sent from a
   computer or tablet over Wi-Fi (see below).
@@ -66,6 +70,11 @@ Pins land on the shelf you are looking at:
   Supernote file API for notes and supported document formats.
 - **Tap the project header** to return to the working note at your last-used
   page.
+- **Tap a project on the Projects tab** to browse that project's shelf without
+  leaving the file you are in, and tap any card there to open it. That view is
+  read-and-open only: pinning, reordering and removing happen on the Shelf tab,
+  from a file inside the project, so an edit can never land on the wrong
+  project's shelf.
 - **Long-press a card** for the detail view:
   - **Starred Pages** — jump chips for every five-star mark in the note
   - **Keywords** — jump chips for native keywords
@@ -282,6 +291,39 @@ change, because its text was never what made it big.
 - Shelf requests file access when it needs to browse/open files or build note
   previews. Delete access is requested when importing `shelf-quote-*.txt`
   files because the source is removed only after the quote is safely saved.
+
+## Unreleased
+
+- **Fixed: the floating button's Open Shelf could hang the device.** After a
+  successful insert, remove or undo, Shelf closed the panel without clearing
+  its progress screen. Reopening from the toolbar cleared it, but Open Shelf
+  reopened the panel directly, so it came back showing a finished operation's
+  progress message — a full-screen overlay with no buttons and nothing left to
+  dismiss it, above everything else on the device. The three success paths now
+  clear it, Open Shelf goes down the same path as the toolbar button, and the
+  progress screen always offers a **Close**.
+
+- **Project shelves are reachable from anywhere.** The Projects tab listed
+  each project's reference count but tapping it opened the project and closed
+  the panel, so the references it advertised could not be seen from outside
+  that project. Tapping a project now shows its shelf.
+- **The Shelf tab says which shelf you are looking at** when the open file is
+  not part of a project, and where the others are.
+- **The saved shelf is written atomically** — to a temp file, then renamed —
+  and a shelf file that cannot be read is no longer treated as an empty shelf.
+  Previously an interrupted write left half a JSON document, which parsed as
+  "no pins" and was then saved over, losing the shelf for good. Shelf now
+  refuses to save over a file it could not read, and says so on screen.
+- **The shelf is never saved before it has been loaded**, and concurrent
+  loads share one read instead of racing past each other.
+- **Fixed: reopening the panel could show the previous visit's shelf.** A
+  lifecycle message arriving while Shelf was still working out which file was
+  open cancelled that work and nothing re-ran it, leaving the previous shelf
+  on screen. Confirmed from a device log; a reset now re-derives.
+- **Paths are compared as paths, not strings.** The same file arrives in
+  different forms from different APIs, so six comparisons — including "is
+  this file already open?" and "does this project exist?" — could treat one
+  file as two.
 
 ## Changes in 0.2.9
 

@@ -7,6 +7,7 @@ import {
   makeShelfTarget,
   normalizeDevicePath,
   projectNoteTarget,
+  samePath,
   targetOpensAtLastUsedPage,
 } from '../src/domain/shelfItem';
 import type {ShelfProject} from '../src/domain/shelfItem';
@@ -74,6 +75,26 @@ describe('normalizeDevicePath', () => {
     expect(normalizeDevicePath('storage/1234-ABCD/Projects/A.note')).toBe(
       '/storage/1234-ABCD/Projects/A.note',
     );
+  });
+});
+
+describe('samePath', () => {
+  it('matches the same file however the path was reported', () => {
+    expect(samePath('/Note/A.note', '/storage/emulated/0/Note/A.note')).toBe(true);
+    expect(samePath('Note/A.note', '/storage/emulated/0/Note/A.note')).toBe(true);
+    expect(samePath('storage/1234-ABCD/A.note', '/storage/1234-ABCD/A.note')).toBe(true);
+  });
+
+  it('keeps different files, and different volumes, apart', () => {
+    expect(samePath('/Note/A.note', '/Note/B.note')).toBe(false);
+    // Same name on the SD card is NOT the same file as the one in internal storage.
+    expect(samePath('/storage/1234-ABCD/Note/A.note', '/Note/A.note')).toBe(false);
+  });
+
+  it('treats a missing path as no match', () => {
+    expect(samePath(null, '/Note/A.note')).toBe(false);
+    expect(samePath('/Note/A.note', undefined)).toBe(false);
+    expect(samePath(null, null)).toBe(false);
   });
 });
 

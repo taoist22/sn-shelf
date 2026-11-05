@@ -2,6 +2,7 @@ import {NativeModules} from 'react-native';
 import {PluginCommAPI, PluginDocAPI, PluginFileAPI} from 'sn-plugin-lib';
 import type {InsertBackground, InsertPosition} from '../domain/pdfInsertion';
 import type {PdfWorkSpace} from '../storage/nativeShelfStorage';
+import {samePath} from '../domain/shelfItem';
 import {shelfLog} from './shelfLog';
 
 /** What the Insert Page screen needs to offer the working-space choice. */
@@ -358,7 +359,7 @@ export async function openFileAndWait(path: string, page: number, timeoutMs = 10
     try {
       const res = (await PluginCommAPI.getCurrentFilePath()) as MarkApiResponse<string>;
       last = String(res?.result);
-      if (res?.success && res.result === path) {
+      if (res?.success && samePath(String(res.result), path)) {
         await shelfLog(`reader switched after ${checks} check(s)`);
         return true;
       }

@@ -23,6 +23,7 @@ import {
   formatPage,
   normalizeDevicePath,
   projectNoteTarget,
+  samePath,
   targetOpensAtLastUsedPage,
   type ShelfProject,
   type ShelfQuote,
@@ -78,6 +79,7 @@ import {
   removeQuoteFromInbox,
   removeQuoteFromProject,
   resolveShelfContext,
+  shelfStorageProblem,
   saveGeneralItems,
   saveProjectReferences,
   getPdfWorkSpace,
@@ -295,6 +297,10 @@ export function PluginScreen(): React.JSX.Element {
   const cardWidthPct: `${number}%` = windowWidth >= 1000 ? '23.5%' : '31.5%';
   const [tab, setTab] = useState<TabKey>('shelf');
   const [context, setContext] = useState<ShelfContext>({kind: 'general'});
+  // A project's shelf opened from the Projects tab. The Shelf tab only ever
+  // shows the project the OPEN FILE belongs to, so without this the
+  // references of every other project are listed by count and unreachable.
+  const [browsingAnchor, setBrowsingAnchor] = useState<string | null>(null);
   const [currentTarget, setCurrentTarget] = useState<ShelfTarget | null>(null);
   const [projects, setProjects] = useState<ShelfProject[]>([]);
   const [generalItems, setGeneralItems] = useState<ShelfTarget[]>([]);
@@ -338,6 +344,10 @@ export function PluginScreen(): React.JSX.Element {
   const [status, setStatus] = useState('');
   const [isReady, setIsReady] = useState(false);
   const refreshGeneration = useRef(0);
+  // A reset cancels whatever refresh is running; this says whether there WAS
+  // one, so the reset can re-derive instead of leaving the previous visit's
+  // shelf on screen (confirmed happening in a device log, 2026-11-04).
+  const refreshInFlight = useRef(false);
   // The last note Shelf saw open this session: where Insert Page steps out to
   // when the PDF has no project note.
   const lastNoteRef = useRef<ShelfTarget | null>(null);
@@ -365,28 +375,54 @@ export function PluginScreen(): React.JSX.Element {
     status.startsWith('Not enough room') ||
     status.includes('Turn the page') ||
     status.includes('handwriting could not') ||
-    status.includes("can't load PDFs over");
+    status.includes("can't load PDFs over") ||
+    status.startsWith('Shelf could not read');
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
-    if (!(await ensureFileReadPermission())) {
-      if (generation === refreshGeneration.current) {
-        setStatus('File access was not allowed. Grant file access, then reopen Shelf.');
+    refreshInFlight.current = true;
+    try {
+      if (!(await ensureFileReadPermission())) {
+        if (generation === refreshGeneration.current) {
+          setStatus('File access was not allowed. Grant file access, then reopen Shelf.');
+        }
+        return;
       }
-      return;
+      const current = await getCurrentTarget().catch(() => null);
+      if (generation !== refreshGeneration.current) {
+        // A newer refresh (or a reset that starts one) owns the screen now.
+        return;
+      }
+      if (current?.kind === 'note') {
+        lastNoteRef.current = current;
+      }
+      const resolved = resolveShelfContext(current?.path ?? null);
+      const storageProblem = shelfStorageProblem();
+      if (storageProblem) {
+        // Saving is disabled while this is true, so say so: a shelf that
+        // silently stops remembering is worse than one that complains.
+        setStatus(
+          `Shelf could not read its saved shelf — ${storageProblem}. Changes are NOT being saved. Reinstalling will not help; tell the developer.`,
+        );
+      }
+      setCurrentTarget(current);
+      setContext(resolved);
+      setProjects([...listProjects()]);
+      setGeneralItems([...getGeneralItems()]);
+      setInboxQuotes([...getInboxQuotes()]);
+      // One line per open: which file Shelf saw, and which shelf that chose.
+      await shelfLog(
+        `shelf: ${current ? `${current.kind} "${current.path}" page ${current.page + 1}` : 'no open file'} -> ${
+          resolved.kind === 'project'
+            ? `project "${resolved.project.anchorPath}", ${resolved.project.references.length} refs`
+            : `general shelf, ${getGeneralItems().length} pinned`
+        }`,
+      );
+    } finally {
+      if (generation === refreshGeneration.current) {
+        refreshInFlight.current = false;
+      }
     }
-    const current = await getCurrentTarget().catch(() => null);
-    if (generation !== refreshGeneration.current) {
-      return;
-    }
-    if (current?.kind === 'note') {
-      lastNoteRef.current = current;
-    }
-    setCurrentTarget(current);
-    setContext(resolveShelfContext(current?.path ?? null));
-    setProjects([...listProjects()]);
-    setGeneralItems([...getGeneralItems()]);
-    setInboxQuotes([...getInboxQuotes()]);
   }, []);
 
   const startCapture = useCallback(async () => {
@@ -628,7 +664,7 @@ export function PluginScreen(): React.JSX.Element {
         spacing: spacingFor('lined', getPdfTemplateSpacing()),
         space: getPdfWorkSpace(),
         spaces,
-        undo: undo && undo.path === current.path ? undo : null,
+        undo: undo && samePath(undo.path, current.path) ? undo : null,
         warning: null,
         undoWarning: null,
         removeWarning: null,
@@ -744,7 +780,7 @@ export function PluginScreen(): React.JSX.Element {
     }
     try {
       const current = await getCurrentTarget();
-      if (current.kind === 'pdf' && current.path === path) {
+      if (current.kind === 'pdf' && samePath(current.path, path)) {
         await openPdfInsert();
       }
     } catch {
@@ -764,6 +800,22 @@ export function PluginScreen(): React.JSX.Element {
         ? {...previous, ...change, warning: null, undoWarning: null, removeWarning: null, error: ''}
         : previous,
     );
+  }, []);
+
+  /**
+   * Closes the panel at the end of a PDF operation and clears the progress
+   * screen behind it. The three success paths used to close while `placing`
+   * was still set, which was invisible until the floating button's Open Shelf
+   * reopened the panel with showPluginView: no reset runs on that path, so the
+   * panel came back showing a progress screen that had no buttons and nothing
+   * left to clear it, above everything else on the device (device report,
+   * 2026-11-04). Cleared AFTER closing so the shelf does not flash up on the
+   * way out.
+   */
+  const finishProgress = useCallback(() => {
+    PluginManager.closePluginView();
+    setPlacing(null);
+    setPlacement(null);
   }, []);
 
   // A note to step out to, so the PDF is CLOSED while its handwriting is
@@ -949,9 +1001,9 @@ export function PluginScreen(): React.JSX.Element {
         await openFileAndWait(request.path, result.firstInsertedIndex);
       }
       pdfOperationRef.current = false;
-      PluginManager.closePluginView();
+      finishProgress();
     },
-    [pdfInsert, noteToStepOutTo],
+    [pdfInsert, noteToStepOutTo, finishProgress],
   );
 
   // Reverse of the insert, also with the PDF closed: handwriting on the added
@@ -1070,9 +1122,9 @@ export function PluginScreen(): React.JSX.Element {
       setPlacing('Reopening the PDF…');
       await openFileAndWait(request.path, Math.min(page, result.finalCount - 1));
       pdfOperationRef.current = false;
-      PluginManager.closePluginView();
+      finishProgress();
     },
-    [pdfInsert, noteToStepOutTo],
+    [pdfInsert, noteToStepOutTo, finishProgress],
   );
 
   const runPdfUndo = useCallback(
@@ -1198,9 +1250,9 @@ export function PluginScreen(): React.JSX.Element {
         Math.min(record.firstInsertedIndex, record.originalCount - 1),
       );
       pdfOperationRef.current = false;
-      PluginManager.closePluginView();
+      finishProgress();
     },
-    [pdfInsert, noteToStepOutTo],
+    [pdfInsert, noteToStepOutTo, finishProgress],
   );
 
   /**
@@ -1218,6 +1270,11 @@ export function PluginScreen(): React.JSX.Element {
       }
       if (id === 'open') {
         await PluginManager.showPluginView();
+        // showPluginView emits no lifecycle event of its own, so without this
+        // the panel comes back exactly as it was left — stale tab, stale
+        // shelf, or a finished operation's progress screen. The toolbar button
+        // emits the same event from index.js; one path, not two.
+        DeviceEventEmitter.emit(SHELF_OPENED_EVENT);
         return;
       }
       if (id !== 'insert' && id !== 'image' && id !== 'remove' && id !== 'undo') {
@@ -1506,12 +1563,14 @@ export function PluginScreen(): React.JSX.Element {
         });
       });
 
-    const resetPanel = () => {
+    const resetPanel = (options?: {rederive?: boolean}) => {
       if (pdfOperationRef.current) {
         // Insert Page / Undo is mid-way between files; it owns the screen.
         return;
       }
+      const cancelledWorkInProgress = refreshInFlight.current;
       refreshGeneration.current += 1;
+      refreshInFlight.current = false;
       detailGeneration.current += 1;
       setTab('shelf');
       setDetailItem(null);
@@ -1527,7 +1586,13 @@ export function PluginScreen(): React.JSX.Element {
       setDeleteArmedPath(null);
       setSelectedQuoteIds(new Set());
       setShowPinChooser(false);
+      setBrowsingAnchor(null);
       setStatus('');
+      // Cancelling a refresh that was about to paint the screen would leave
+      // the previous visit's shelf showing, so run a fresh one.
+      if (cancelledWorkInProgress && options?.rederive !== false) {
+        refresh();
+      }
     };
 
     const sub = PluginManager.registerPluginLifeListener({
@@ -1544,7 +1609,7 @@ export function PluginScreen(): React.JSX.Element {
     // The panel can stay mounted across opens without onStart firing; the
     // toolbar button press (relayed from index.js) always does.
     const openedSub = DeviceEventEmitter.addListener(SHELF_OPENED_EVENT, () => {
-      resetPanel();
+      resetPanel({rederive: false});
       // Reopening must not show the previous visit's tab or status (the
       // panel stays mounted, so onStop cannot be relied on for this).
       // The user may have written on pages since the last visit; placement
@@ -1683,8 +1748,8 @@ export function PluginScreen(): React.JSX.Element {
           setShowPinChooser(false);
           return;
         }
-        const project = listProjects().find(
-          entry => entry.anchorPath === anchorPath,
+        const project = listProjects().find(entry =>
+          samePath(entry.anchorPath, anchorPath),
         );
         if (!project) {
           setStatus('That project no longer exists.');
@@ -1733,7 +1798,7 @@ export function PluginScreen(): React.JSX.Element {
         : '';
       if (context.kind === 'project') {
         const kept = context.project.references.filter(
-          item => !targets.some(target => target.path === item.path),
+          item => !targets.some(target => samePath(target.path, item.path)),
         );
         saveProjectReferences(context.project.anchorPath, [...targets, ...kept]);
         setStatus(
@@ -1741,7 +1806,7 @@ export function PluginScreen(): React.JSX.Element {
         );
       } else {
         const kept = generalItems.filter(
-          item => !targets.some(target => target.path === item.path),
+          item => !targets.some(target => samePath(target.path, item.path)),
         );
         saveGeneralItems([...targets, ...kept]);
         setStatus(
@@ -2022,7 +2087,7 @@ export function PluginScreen(): React.JSX.Element {
   const currentIsNote = currentTarget?.kind === 'note';
   const currentIsAnchor =
     currentIsNote &&
-    projects.some(project => project.anchorPath === currentTarget?.path);
+    projects.some(project => samePath(project.anchorPath, currentTarget?.path));
 
   function renderGrid(items: ShelfTarget[]): React.JSX.Element {
     return (
@@ -3063,7 +3128,9 @@ export function PluginScreen(): React.JSX.Element {
           <Text style={styles.eyebrow}>General Shelf</Text>
           <Text style={styles.workingEmpty}>
             {isReady
-              ? 'This file is not part of a project. Pins made here go to the general shelf.'
+              ? projects.length > 0
+                ? 'This file is not part of a project, so this is the general shelf. Each project keeps its own shelf — open it from the Projects tab.'
+                : 'This file is not part of a project. Pins made here go to the general shelf.'
               : 'Loading saved shelf...'}
           </Text>
           {currentIsNote && !currentIsAnchor ? (
@@ -3105,14 +3172,103 @@ export function PluginScreen(): React.JSX.Element {
     );
   }
 
+  /**
+   * One project's shelf, reached from the Projects tab. Read-and-open only:
+   * the detail sheet's actions (unpin, re-page, move) save against the
+   * context the OPEN FILE resolved to, so offering them here would edit the
+   * wrong project's shelf.
+   */
+  function renderBrowsedProject(project: ShelfProject): React.JSX.Element {
+    const workingTarget = projectNoteTarget(project);
+    return (
+      <>
+        <View style={styles.workingPanel}>
+          <Text style={styles.eyebrow}>
+            {project.anchorKind === 'folder' ? 'Folder Project' : 'Project'}
+          </Text>
+          <Text style={styles.workingTitle}>{project.anchorTitle}</Text>
+          <Text style={styles.tapHint}>
+            Tap a card to open it. Pinning and editing happen on the Shelf tab,
+            from a file in this project.
+          </Text>
+          <View style={styles.workingActions}>
+            <Pressable
+              style={[styles.button, styles.backButton]}
+              onPress={() => setBrowsingAnchor(null)}>
+              <Text style={styles.backButtonText}>Back to Projects</Text>
+            </Pressable>
+            <Pressable
+              style={styles.folderLink}
+              onPress={() => openAnchor(project)}>
+              <Text style={styles.folderLinkText}>
+                {project.anchorKind === 'folder' ? 'Open Folder' : 'Open Project Note'}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {status ? (
+          <Text style={statusStrong ? styles.statusStrong : styles.status}>
+            {status}
+          </Text>
+        ) : null}
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>
+            {project.anchorTitle} Reference Shelf
+          </Text>
+          <Text style={styles.count}>{project.references.length}</Text>
+        </View>
+
+        {!workingTarget && project.references.length === 0 ? (
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyTitle}>No references pinned yet.</Text>
+            <Text style={styles.emptyBody}>
+              Open a file in this project, then tap Pin This Page.
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.grid}>
+            {workingTarget ? (
+              <ThumbCard
+                key={WORKING_CARD_ID}
+                item={{...workingTarget, id: WORKING_CARD_ID}}
+                widthPct={cardWidthPct}
+                badge="WORKING"
+                onOpen={() => openAnchor(project)}
+                onDetail={() => {}}
+              />
+            ) : null}
+            {project.references.map(item => (
+              <ThumbCard
+                key={item.id}
+                item={item}
+                widthPct={cardWidthPct}
+                onOpen={openItem}
+                onDetail={() => {}}
+              />
+            ))}
+          </View>
+        )}
+      </>
+    );
+  }
+
   function renderProjectsTab(): React.JSX.Element {
+    const browsed = browsingAnchor
+      ? projects.find(project => samePath(project.anchorPath, browsingAnchor))
+      : undefined;
+    if (browsed) {
+      return renderBrowsedProject(browsed);
+    }
     return (
       <>
         <View style={styles.workingPanel}>
           <Text style={styles.eyebrow}>Projects</Text>
           <Text style={styles.workingEmpty}>
-            A project note shows only its own reference shelf. Deleting a
-            project moves its references to the general shelf.
+            A project note shows only its own reference shelf. Tap a project
+            here to see that shelf from anywhere. Deleting a project moves its
+            references to the general shelf.
           </Text>
           <View style={styles.actionsRow}>
             <Pressable
@@ -3163,7 +3319,7 @@ export function PluginScreen(): React.JSX.Element {
             <View key={project.anchorPath} style={styles.item}>
               <Pressable
                 style={styles.itemMain}
-                onPress={() => openAnchor(project)}>
+                onPress={() => setBrowsingAnchor(project.anchorPath)}>
                 <Text style={styles.itemTitle}>{project.anchorTitle}</Text>
                 <Text style={styles.itemMeta}>
                   {project.anchorKind === 'folder' ? 'FOLDER · ' : 'NOTE · '}
@@ -3213,6 +3369,14 @@ export function PluginScreen(): React.JSX.Element {
           <Text style={styles.placingHint}>
             {'Shelf closes by itself when it is done.'}
           </Text>
+          {/* A progress screen with no control is a wall: this one trapped the
+              device when it was shown after its operation had finished. The way
+              out stays available even while the work is genuinely running. */}
+          <Pressable
+            style={[styles.button, styles.backButton]}
+            onPress={finishProgress}>
+            <Text style={styles.backButtonText}>Close</Text>
+          </Pressable>
         </View>
       </SafeAreaView>
     );

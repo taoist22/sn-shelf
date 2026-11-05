@@ -1,5 +1,5 @@
 import type {ShelfProject, ShelfTarget} from './shelfItem';
-import {fileTitle, normalizeDevicePath} from './shelfItem';
+import {fileTitle, normalizeDevicePath, samePath} from './shelfItem';
 import type {PersistedShelfState} from '../storage/nativeShelfStorage';
 
 /**
@@ -38,7 +38,7 @@ export function resolveContext(
       // A file pinned in several projects resolves to the most recently
       // seen one; activeAnchorPath records that recency.
       const preferred =
-        holders.find(project => project.anchorPath === state.activeAnchorPath) ??
+        holders.find(project => samePath(project.anchorPath, state.activeAnchorPath)) ??
         holders[0];
       state.activeAnchorPath = preferred.anchorPath;
       return {
@@ -62,8 +62,8 @@ export function resolveContext(
         project => project.anchorPath.length === deepest,
       );
       const preferred =
-        candidates.find(
-          project => project.anchorPath === state.activeAnchorPath,
+        candidates.find(project =>
+          samePath(project.anchorPath, state.activeAnchorPath),
         ) ?? candidates[0];
       state.activeAnchorPath = preferred.anchorPath;
       return {
@@ -88,7 +88,7 @@ export function findProject(
   state: PersistedShelfState,
   anchorPath: string,
 ): ShelfProject | undefined {
-  return state.projects.find(project => project.anchorPath === anchorPath);
+  return state.projects.find(project => samePath(project.anchorPath, anchorPath));
 }
 
 /** Creates a project anchored on a note or folder; idempotent. */
@@ -146,14 +146,14 @@ export function deleteProject(
   const kept = project.references.filter(
     reference =>
       !state.general.some(
-        item => item.path === reference.path && item.page === reference.page,
+        item => samePath(item.path, reference.path) && item.page === reference.page,
       ),
   );
   state.general = [...kept, ...state.general];
   state.projects = state.projects.filter(
-    entry => entry.anchorPath !== anchorPath,
+    entry => !samePath(entry.anchorPath, anchorPath),
   );
-  if (state.activeAnchorPath === anchorPath) {
+  if (samePath(state.activeAnchorPath, anchorPath)) {
     state.activeAnchorPath = null;
   }
 }
@@ -171,7 +171,7 @@ export function moveGeneralItemToProject(
   }
   state.general = state.general.filter(entry => entry.id !== itemId);
   const duplicate = project.references.some(
-    reference => reference.path === item.path && reference.page === item.page,
+    reference => samePath(reference.path, item.path) && reference.page === item.page,
   );
   if (!duplicate) {
     project.references = [item, ...project.references];

@@ -2,7 +2,7 @@ jest.mock('../src/storage/nativeShelfStorage', () => {
   const actual = jest.requireActual('../src/storage/nativeShelfStorage') as object;
   return {
     ...actual,
-    loadPersistedShelfState: jest.fn(async () => null),
+    readShelfState: jest.fn(async () => ({status: 'empty'})),
     savePersistedShelfState: jest.fn(async () => undefined),
   };
 });

@@ -1,6 +1,6 @@
 import {NativeModules} from 'react-native';
 import {PluginCommAPI, PluginFileAPI, PluginManager} from 'sn-plugin-lib';
-import {isDocumentKind, type ShelfTarget} from '../domain/shelfItem';
+import {isDocumentKind, samePath, type ShelfTarget} from '../domain/shelfItem';
 import {ensureFileReadPermission} from './pluginPermissions';
 import {nativeDelay} from './pdfEdit';
 import {shelfLog} from './shelfLog';
@@ -100,7 +100,7 @@ export async function openShelfTarget(
       const currentRes = (await PluginCommAPI.getCurrentFilePath()) as
         | ApiResponse<string>
         | undefined;
-      if (currentRes?.success && currentRes.result === target.path) {
+      if (currentRes?.success && samePath(String(currentRes.result), target.path)) {
         await shelfLog('already open: jumping within the file');
         if (page >= 0) {
           const jumpRes = (await PluginCommAPI.jumpToPage(page)) as ApiResponse<boolean>;

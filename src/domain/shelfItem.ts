@@ -107,6 +107,20 @@ export function normalizeDevicePath(path: string): string {
   return `/storage/emulated/0/${path}`;
 }
 
+/**
+ * Whether two paths name the same file. The same file arrives in different
+ * forms depending on which API produced it (the picker, the reader, the native
+ * folder browser), so every comparison of a stored path against a live one has
+ * to normalize first. Comparing raw strings let the same note anchor two
+ * projects and made "is this file already open?" answer no while it was open.
+ */
+export function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) {
+    return false;
+  }
+  return normalizeDevicePath(a) === normalizeDevicePath(b);
+}
+
 export function fileTitle(path: string): string {
   const name = path.split('/').filter(Boolean).pop() ?? path;
   return name.replace(/\.[^/.]+$/, '') || name;

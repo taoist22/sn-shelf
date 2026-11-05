@@ -73,7 +73,7 @@ public class ShelfPdfEditModule extends ReactContextBaseJavaModule {
      * mean a half-installed package — which is exactly the confusion a hand-kept number
      * caused (2026-10-30).
      */
-    static final String BUILD_ID = "2026-11-02 19:30 be7efec";
+    static final String BUILD_ID = "2026-11-04 15:43 87291ee";
     private static final File LOG_FILE = new File("/storage/emulated/0/EXPORT/shelf-log.txt");
     private static final long LOG_MAX_BYTES = 512L * 1024;
     private static final float MM = 72f / 25.4f;

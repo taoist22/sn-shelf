@@ -1,4 +1,12 @@
 import type {ShelfProject, ShelfQuote, ShelfTarget} from '../domain/shelfItem';
+import {shelfLog} from '../supernote/shelfLog';
+
+/** Fire-and-forget log line: the savers that need it are synchronous. */
+function logLine(line: string): void {
+  shelfLog(line).catch(() => {
+    // logging must never break the feature it describes
+  });
+}
 import {normalizeDevicePath, projectNoteTarget} from '../domain/shelfItem';
 import {
   type InsertPosition,
@@ -16,7 +24,7 @@ import {
 } from '../domain/shelfState';
 import {
   emptyShelfState,
-  loadPersistedShelfState,
+  readShelfState,
   savePersistedShelfState,
   type HeadingText,
   type PdfWorkSpace,
@@ -24,24 +32,75 @@ import {
 } from './nativeShelfStorage';
 
 let state: PersistedShelfState = emptyShelfState();
-let isHydrated = false;
+let hydration: Promise<void> | null = null;
+/** Set once the saved shelf has actually been read, not merely requested. */
+let hydrationFinished = false;
+/**
+ * Set when the saved shelf could not be read. Saving is then refused: the file
+ * may hold the user's only copy of their shelf, and writing the empty
+ * in-memory state over it would destroy it.
+ */
+let storageProblem: string | null = null;
+
+/** Why the shelf is not being saved, for the panel to show; null when all is well. */
+export function shelfStorageProblem(): string | null {
+  return storageProblem;
+}
+
+/** One compact line describing the whole shelf, for the diagnostic log. */
+export function summarizeShelfState(): string {
+  const projects = state.projects
+    .map(
+      project =>
+        `${project.anchorKind} "${project.anchorPath}" refs=${project.references.length}`,
+    )
+    .join(' | ');
+  return `general=${state.general.length} projects=${state.projects.length}${
+    projects ? ` [${projects}]` : ''
+  } active=${state.activeAnchorPath ?? 'none'}`;
+}
 
 function persist(): void {
-  savePersistedShelfState(state).catch(() => {
-    // Persistence is best-effort; the in-memory shelf remains usable.
+  if (!hydrationFinished) {
+    // Before the read finishes the in-memory shelf is still the empty
+    // starting state, so saving it would wipe the stored one.
+    logLine('state: save skipped, the saved shelf has not been read yet');
+    return;
+  }
+  if (storageProblem) {
+    logLine(`state: save refused, ${storageProblem}`);
+    return;
+  }
+  savePersistedShelfState(state).catch(error => {
+    logLine(`state: save failed (${String(error)})`);
   });
 }
 
-export async function hydrateShelfState(): Promise<void> {
-  if (isHydrated) {
-    return;
+/**
+ * Reads the saved shelf once. Concurrent callers await the SAME read rather
+ * than racing past it: the guard used to be set before the await, so a second
+ * caller carried on with the empty starting state.
+ */
+export function hydrateShelfState(): Promise<void> {
+  if (!hydration) {
+    hydration = (async () => {
+      const load = await readShelfState();
+      if (load.status === 'loaded') {
+        state = load.state;
+      } else if (load.status === 'unreadable') {
+        storageProblem = `the saved shelf ${load.detail}`;
+      }
+      hydrationFinished = true;
+      await shelfLog(
+        load.status === 'loaded'
+          ? `shelf loaded: ${summarizeShelfState()}`
+          : load.status === 'empty'
+            ? 'shelf loaded: nothing saved yet'
+            : `shelf NOT loaded: ${load.detail}; saving is disabled to protect the file`,
+      );
+    })();
   }
-  isHydrated = true;
-
-  const persisted = await loadPersistedShelfState();
-  if (persisted) {
-    state = persisted;
-  }
+  return hydration;
 }
 
 /** Every target that may own a cached thumbnail (pins + working notes). */

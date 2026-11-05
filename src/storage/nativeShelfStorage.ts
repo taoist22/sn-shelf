@@ -185,16 +185,38 @@ export function emptyShelfState(): PersistedShelfState {
  * follow the working note into its project so the visible shelf is
  * unchanged after upgrade; without a working note they land in general.
  */
+/**
+ * Reports what was in the saved file: a state, or nothing readable. Keeping
+ * "unreadable" distinct from "empty" is what stops a truncated file being
+ * treated as an empty shelf and then saved over (2026-11-04).
+ */
+export type ShelfLoad =
+  | {status: 'loaded'; state: PersistedShelfState}
+  | {status: 'empty'}
+  | {status: 'unreadable'; detail: string};
+
 export function parsePersistedShelfState(raw: string): PersistedShelfState {
+  const strict = parseShelfStateStrict(raw);
+  return strict.status === 'loaded' ? strict.state : emptyShelfState();
+}
+
+export function parseShelfStateStrict(raw: string): ShelfLoad {
+  if (raw.trim() === '') {
+    return {status: 'empty'};
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
-    return emptyShelfState();
+  } catch (error) {
+    return {status: 'unreadable', detail: `not valid JSON (${String(error)})`};
   }
   if (!parsed || typeof parsed !== 'object') {
-    return emptyShelfState();
+    return {status: 'unreadable', detail: 'not an object'};
   }
+  return {status: 'loaded', state: readShelfStateObject(parsed)};
+}
+
+function readShelfStateObject(parsed: object): PersistedShelfState {
 
   const value = parsed as {
     version?: unknown;
@@ -296,12 +318,20 @@ export function parsePersistedShelfState(raw: string): PersistedShelfState {
   };
 }
 
-export async function loadPersistedShelfState(): Promise<PersistedShelfState | null> {
-  const raw = await ShelfStorage?.readState();
-  if (!raw) {
-    return null;
+export async function readShelfState(): Promise<ShelfLoad> {
+  if (!ShelfStorage?.readState) {
+    return {status: 'empty'};
   }
-  return parsePersistedShelfState(raw);
+  let raw: string | null;
+  try {
+    raw = await ShelfStorage.readState();
+  } catch (error) {
+    return {status: 'unreadable', detail: `could not be read (${String(error)})`};
+  }
+  if (raw === null || raw === undefined) {
+    return {status: 'empty'};
+  }
+  return parseShelfStateStrict(raw);
 }
 
 export async function savePersistedShelfState(
